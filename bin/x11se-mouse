@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Command-line interface for Attack Shark X11SE status and tuning."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PLUGIN_DIR))
+
+import x11se_mouse as mouse
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="x11se-mouse", description="Read and tune an Attack Shark X11SE mouse")
+    parser.add_argument("--device", help="use a specific hidraw device (default: discover interface 02)")
+    commands = parser.add_subparsers(dest="command", required=True)
+    status = commands.add_parser("status", help="read current battery, DPI, and polling rate")
+    status.add_argument("--json", action="store_true", help="print one JSON object")
+    commands.add_parser("watch", help="stream battery events without polling mouse settings")
+    commands.add_parser("set-dpi", help="set the active DPI stage").add_argument("value", type=int)
+    commands.add_parser("set-polling", help="set polling rate in Hz").add_argument("value", type=int, choices=sorted(mouse.POLLING_CODES))
+    return parser
+
+
+def status_once(device: str | None) -> dict:
+    fd, _ = mouse.open_device(device)
+    try:
+        cached = load_cached_status()
+        battery = {key: cached[key] for key in ("battery", "chargeState") if cached.get(key) is not None}
+        mouse.drain_events(fd, battery, timeout=0)
+        result = mouse.query_status(fd, battery)
+        mouse.drain_events(fd, battery, timeout=0)
+        result.update(battery)
+        save_cached_status(result)
+        return result
+    finally:
+        os.close(fd)
+
+
+def cache_path() -> Path:
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+    return state_home / "omarchy" / "x11se-mouse.json"
+
+
+def load_cached_status() -> dict:
+    try:
+        data = json.loads(cache_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"connected": True, "battery": None, "chargeState": None,
+            "dpi": None, "stage": None, "stages": None, "polling": None, "error": None}
+
+
+def save_cached_status(status: dict) -> None:
+    path = cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(status, separators=(",", ":")), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
+
+
+def watch(device: str | None) -> int:
+    while True:
+        path = device or mouse.find_hidraw()
+        if not path:
+            status = mouse.device_error_status("X11SE 2.4 GHz receiver was not found")
+            mouse.json_line(status)
+            time.sleep(3)
+            continue
+        try:
+            fd, path = mouse.open_device(path)
+        except mouse.MouseError as error:
+            status = mouse.device_error_status(str(error))
+            mouse.json_line(status)
+            time.sleep(5)
+            continue
+        try:
+            status = load_cached_status()
+            status.update({"connected": True, "error": None})
+            changed = mouse.drain_events(fd, status, timeout=0.2)
+            if changed:
+                save_cached_status(status)
+            mouse.json_line(status)
+            while os.path.exists(path):
+                with mouse.protocol_lock():
+                    changed = mouse.drain_events(fd, status, timeout=0.2)
+                if changed:
+                    cached = load_cached_status()
+                    cached.update({
+                        "connected": True,
+                        "battery": status.get("battery"),
+                        "chargeState": status.get("chargeState"),
+                        "error": None,
+                    })
+                    status.update(cached)
+                    save_cached_status(cached)
+                    mouse.json_line(status)
+        except (OSError, ValueError):
+            pass
+        finally:
+            os.close(fd)
+        time.sleep(1)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "watch":
+            return watch(args.device)
+        if args.command == "status":
+            result = status_once(args.device)
+            if args.json:
+                print(json.dumps(result, separators=(",", ":")))
+            else:
+                print(mouse.status_text(result))
+            return 0 if result["connected"] else 1
+        if args.command in ("set-dpi", "set-polling") and not mouse.WRITES_ENABLED:
+            raise mouse.MouseError("X11SE setting writes are disabled because they disconnect the receiver")
+        fd, _ = mouse.open_device(args.device)
+        try:
+            if args.command == "set-dpi":
+                changed = mouse.set_dpi(fd, args.value)
+                result = {"ok": True, **changed, "message": f"Active DPI set to {changed['dpi']}"}
+                cached = load_cached_status()
+                cached.update({key: changed.get(key) for key in ("dpi", "stage", "stages")})
+                cached["connected"] = True
+                save_cached_status(cached)
+            elif args.command == "set-polling":
+                rate, acknowledged = mouse.set_polling(fd, args.value)
+                result = {"ok": True, "polling": rate, "verified": True, "acknowledged": acknowledged,
+                          "message": f"Polling rate set to {rate} Hz"}
+                cached = load_cached_status()
+                cached.update({"connected": True, "polling": rate})
+                save_cached_status(cached)
+            else:
+                raise ValueError(f"Unknown command: {args.command}")
+            print(json.dumps(result, separators=(",", ":")))
+            return 0
+        finally:
+            os.close(fd)
+    except (mouse.MouseError, OSError, ValueError) as error:
+        result = {"ok": False, "error": str(error)}
+        if args.command == "status":
+            result = mouse.device_error_status(str(error))
+            if not args.json:
+                print(mouse.status_text(result))
+            else:
+                print(json.dumps(result, separators=(",", ":")))
+        elif args.command == "watch":
+            mouse.json_line(result)
+        else:
+            print(json.dumps(result, separators=(",", ":")))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
