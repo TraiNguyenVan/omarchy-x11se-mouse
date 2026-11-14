@@ -60,6 +60,7 @@ class ProtocolTests(unittest.TestCase):
             with self.subTest(dpi=dpi):
                 encoded = mouse.encode_dpi(dpi)
                 self.assertEqual(mouse.decode_dpi_value(*encoded), dpi)
+        self.assertEqual(mouse.COMMON_DPI_PRESETS, (400, 800, 1600, 2400, 3200, 5000, 22000))
 
     def test_panel_presets_match_verified_protocol_presets(self):
         panel = Path(__file__).resolve().parents[1].joinpath("Panel.qml").read_text(encoding="utf-8")

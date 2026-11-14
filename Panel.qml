@@ -275,8 +275,8 @@ Item {
                     options: [
                         { value: "400", label: "400" },
                         { value: "800", label: "800" },
-                        { value: "1200", label: "1,200" },
-                        { value: "1600", label: "1,600" }
+                        { value: "1600", label: "1,600" },
+                        { value: "2400", label: "2,400" }
                     ]
                     value: String(root.displayDpi)
                     foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -291,9 +291,9 @@ Item {
                 ButtonGroup {
                     width: parent.width
                     options: [
-                        { value: "2400", label: "2,400" },
                         { value: "3200", label: "3,200" },
-                        { value: "6400", label: "6,400" }
+                        { value: "5000", label: "5,000" },
+                        { value: "22000", label: "22,000" }
                     ]
                     value: String(root.displayDpi)
                     foreground: root.bar ? root.bar.foreground : Color.foreground

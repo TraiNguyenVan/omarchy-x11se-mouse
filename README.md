@@ -49,7 +49,7 @@ python -m unittest discover -s tests -v
 
 ## DPI presets
 
-The panel offers 400, 800, 1,200, 1,600, 2,400, 3,200, and 6,400 DPI. Protocol tests verify that each preset round-trips through the receiver's encoding. DPI and polling writes have been exercised on an X11SE receiver.
+The panel offers 400, 800, 1,600, 2,400, 3,200, 5,000, and 22,000 DPI. Protocol tests verify that each preset round-trips through the receiver's encoding. DPI and polling writes have been exercised on an X11SE receiver.
 
 ## License
 
