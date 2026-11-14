@@ -2,6 +2,15 @@
 
 An Omarchy bar widget and standalone CLI for the Attack Shark X11SE 2.4 GHz receiver. The bar shows battery, active DPI, and polling rate; click the mouse icon to choose a fixed DPI preset or polling rate.
 
+![Mouse settings panel centered on an ImageGen-created backdrop; the panel itself is the original cropped desktop capture.](assets/x11se-mouse-showcase.png)
+
+<details>
+<summary>View the original cropped panel capture</summary>
+
+![Original X11SE mouse panel capture](assets/x11se-mouse-panel.png)
+
+</details>
+
 ## Install
 
 Install the plugin from Omarchy:
