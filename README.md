@@ -2,6 +2,8 @@
 
 An Omarchy bar widget and standalone CLI for the Attack Shark X11SE 2.4 GHz receiver. The bar shows battery, active DPI, and polling rate; click the mouse icon to choose a fixed DPI preset or polling rate.
 
+**Requirements:** Omarchy Quattro, Python 3.10 or newer (standard library only), and the X11SE 2.4 GHz receiver.
+
 ![Mouse settings panel centered on an ImageGen-created backdrop; the panel itself is the original cropped desktop capture.](assets/x11se-mouse-showcase.png)
 
 <details>
@@ -26,6 +28,19 @@ sudo ~/.config/omarchy/plugins/trai.x11se-mouse/scripts/install-udev-rule.sh
 ```
 
 Reconnect the receiver after setup. If the script adds your account to `input`, log out and back in for the new group membership to take effect. The plugin itself does not use sudo; normal status reads and settings changes run as your user.
+
+## Remove
+
+Remove the plugin and its device rule:
+
+```sh
+omarchy plugin remove trai.x11se-mouse
+sudo rm /etc/udev/rules.d/99-x11se-hidraw.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=hidraw
+```
+
+If setup added your account to the `input` group and you no longer need that membership for other devices, remove it with `sudo gpasswd -d "$USER" input`, then log out and back in.
 
 ## CLI
 
