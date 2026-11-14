@@ -36,10 +36,9 @@ The CLI runs without Quickshell and requires the receiver's udev permission abov
 ./bin/x11se-mouse status --json
 ./bin/x11se-mouse set-dpi 800
 ./bin/x11se-mouse set-polling 500
-./bin/x11se-mouse watch
 ```
 
-`watch` listens for battery events and replays the last known settings from the state cache. It does not poll feature reports. `status` reads current settings on demand. Polling changes are verified by reading the selected rate back from the receiver, including when its acknowledgement is missing.
+The bar starts `watch` automatically to receive battery events and keep its status current; you do not need to launch it yourself. For troubleshooting, `./bin/x11se-mouse watch` streams battery events without polling feature reports. `status` reads current settings on demand. Polling changes are verified by reading the selected rate back from the receiver, including when its acknowledgement is missing.
 
 Run protocol tests without a mouse attached:
 
