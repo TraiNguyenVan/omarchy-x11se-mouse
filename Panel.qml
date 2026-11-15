@@ -58,8 +58,18 @@ Item {
     function savePresetDraft() {
         if (presetSaving || !validPresets(presetDraft)) return
         savingPresets = presetDraft.slice()
+        var contents = JSON.stringify(savingPresets) + "\n"
+        if (presetFile.text() === contents) {
+            presets = savingPresets.slice()
+            editingPresets = false
+            actionError = false
+            actionMessage = "Presets already saved"
+            return
+        }
         presetSaving = true
-        presetFile.setText(JSON.stringify(savingPresets) + "\n")
+        actionError = false
+        actionMessage = "Saving presets…"
+        presetFile.setText(contents)
     }
 
     FileView {
@@ -374,9 +384,10 @@ Item {
                             onClicked: dpiLabel.openEditor()
                         }
                     }
-                    Dropdown {
+                    BoundedDropdown {
                         id: dpiSelect; anchors.right: parent.right
-                        width: Style.space(133.0); showLabel: false
+                        boundsItem: visual.parent
+                        width: Style.space(133.0)
                         enabled: root.connected; opacity: enabled ? 1 : 0.5
                         value: String(root.displayDpi); options: root.dpiOptions
                         fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
@@ -468,9 +479,10 @@ Item {
                                 color: Color.muted; font.family: root.bar ? root.bar.fontFamily : Style.font.family
                                 font.pixelSize: Style.font.caption
                             }
-                            Dropdown {
+                            BoundedDropdown {
                                 id: slotSelect
-                                width: parent.width; showLabel: false
+                                boundsItem: visual.parent
+                                width: parent.width
                                 enabled: !root.presetSaving
                                 value: String(parent.modelData); options: root.presetOptions(parent.index)
                                 fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
@@ -517,14 +529,16 @@ Item {
             id: statusDot; x: Style.space(3.8); anchors.verticalCenter: statusText.verticalCenter
             width: Style.space(5.7); height: Style.space(5.7)
             color: root.actionError || (root.hostWidget && root.hostWidget.deviceState === "disconnected") ? Color.urgent
-                : (commandProcess.running || statusProcess.running || root.lowBattery || (root.hostWidget && root.hostWidget.cacheUnavailable) ? "#e5b567" : Color.accent)
+                : (root.presetSaving || commandProcess.running || statusProcess.running || root.lowBattery || (root.hostWidget && root.hostWidget.cacheUnavailable) ? "#e5b567" : Color.accent)
         }
         Text {
             id: statusText
             anchors.left: statusDot.right; anchors.right: parent.right
             anchors.leftMargin: Style.space(8.55); y: (footerLine.y + parent.height + popup.padding - height) / 2; height: Style.space(25.65)
             textFormat: Text.PlainText; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter
-            text: (root.hostWidget && root.hostWidget.cacheUnavailable && !root.actionError && !commandProcess.running && !statusProcess.running) ? "Status cache unavailable · check CLI warnings" : root.actionMessage || (root.lowBattery ? "Battery low · " + hostWidget.battery + "%" : (root.connected ? "Last known settings" : "Receiver unavailable. Check the receiver and refresh."))
+            text: (root.hostWidget && root.hostWidget.cacheUnavailable && !root.actionError && !root.presetSaving && !commandProcess.running && !statusProcess.running)
+                ? (root.actionMessage === "Presets saved" || root.actionMessage === "Presets already saved" ? root.actionMessage + " · status cache unavailable" : "Status cache unavailable · check CLI warnings")
+                : root.actionMessage || (root.lowBattery ? "Battery low · " + hostWidget.battery + "%" : (root.connected ? "Last known settings" : "Receiver unavailable. Check the receiver and refresh."))
             color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.72); font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Math.round(Style.font.body * 1.1)
         }
     }
