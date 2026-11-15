@@ -1,17 +1,10 @@
 # Omarchy X11SE Mouse
 
-An Omarchy bar widget and standalone CLI for the Attack Shark X11SE 2.4 GHz receiver. The bar shows battery, active DPI, and polling rate; click the mouse icon to choose a fixed DPI preset or polling rate.
+An Omarchy bar widget and standalone CLI for the Attack Shark X11SE 2.4 GHz receiver. Hover over the mouse icon for battery, DPI and polling-rate status; click it to open the settings panel.
 
-**Requirements:** Omarchy Quattro, Python 3.10 or newer (standard library only), and the X11SE 2.4 GHz receiver.
+**Requirements:** Omarchy Quattro, Python 3.10 or newer (standard library only), and the X11SE 2.4 GHz receiver. Other Attack Shark models are not currently supported.
 
-![Mouse settings panel centered on an ImageGen-created backdrop; the panel itself is the original cropped desktop capture.](assets/x11se-mouse-showcase.png)
-
-<details>
-<summary>View the original cropped panel capture</summary>
-
-![Original X11SE mouse panel capture](assets/x11se-mouse-panel.png)
-
-</details>
+![X11SE mouse settings panel with battery, DPI presets and polling-rate controls](assets/x11se-current-panel.png)
 
 ## Install
 
@@ -42,28 +35,43 @@ sudo udevadm trigger --subsystem-match=hidraw
 
 If setup added your account to the `input` group and you no longer need that membership for other devices, remove it with `sudo gpasswd -d "$USER" input`, then log out and back in.
 
+## Using the panel
+
+Click the mouse icon in the bar to open the panel. Select a DPI preset or polling rate to change the mouse setting. The dashed outline indicates a change is being applied; the filled button shows the last known or confirmed setting. Use **Refresh** to read current settings from the receiver.
+
+The default DPI presets are 400, 800, 1,600, 2,400, 3,200, 5,000 and 22,000. Click the underlined **DPI PRESET** label to choose seven different values for the preset board. Saving the board does not change the current DPI. Presets are saved in `${XDG_CONFIG_HOME:-~/.config}/omarchy/x11se-presets.json`.
+
+The DPI dropdown contains 33 values confirmed by receiver readback during testing; it is not a complete scan of the mouse’s supported range. The preset editor also includes the seven defaults. Available polling rates are 125, 250, 500 and 1,000 Hz.
+
+Hover over the mouse illustration to reveal six clickable appearance choices. These change the illustration manually; the plugin does not detect the physical mouse color.
+
+The bar’s watcher listens for battery events without periodically polling settings. Some displayed values can be cached; use **Refresh** to request current settings.
+
 ## CLI
 
-The CLI runs without Quickshell and requires the receiver's udev permission above:
+Run the CLI from the plugin directory, `~/.config/omarchy/plugins/trai.x11se-mouse`. Device commands require the receiver permission described above.
 
 ```sh
 ./bin/x11se-mouse status
 ./bin/x11se-mouse status --json
 ./bin/x11se-mouse set-dpi 800
 ./bin/x11se-mouse set-polling 500
+./bin/x11se-mouse capabilities
 ```
 
-The bar starts `watch` automatically to receive battery events and keep its status current; you do not need to launch it yourself. For troubleshooting, `./bin/x11se-mouse watch` streams battery events without polling feature reports. `status` reads current settings on demand. Polling changes are verified by reading the selected rate back from the receiver, including when its acknowledgement is missing.
+The bar starts `watch` automatically. Run `./bin/x11se-mouse watch` to inspect its JSON event stream, or add `--debug` to a device command for Python tracebacks. `capabilities` prints the X11SE model descriptor without accessing the receiver. Run `./bin/x11se-mouse --help` for all options.
 
-Run protocol tests without a mouse attached:
+DPI and polling changes are checked using receiver readback. If an acknowledgement is missing but readback confirms the requested setting, the CLI reports success with a warning; mismatches and failed readbacks are reported as errors.
+
+## Development
+
+Run the device-free protocol and CLI tests with:
 
 ```sh
 python -m unittest discover -s tests -v
 ```
 
-## DPI presets
-
-The panel offers 400, 800, 1,600, 2,400, 3,200, 5,000, and 22,000 DPI. Protocol tests verify that each preset round-trips through the receiver's encoding. DPI and polling writes have been exercised on an X11SE receiver.
+See [DEVELOPING.md](DEVELOPING.md) for the model boundary and the evidence needed to add another mouse.
 
 ## License
 
