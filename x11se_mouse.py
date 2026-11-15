@@ -23,6 +23,8 @@ POLLING_CODES = {125: 0x08, 250: 0x04, 500: 0x02, 1000: 0x01}
 CODE_POLLING = {value: key for key, value in POLLING_CODES.items()}
 COMMON_DPI_PRESETS = (400, 800, 1600, 2400, 3200, 5000, 22000)
 WRITES_ENABLED = True
+CACHE_WARNINGS: list[dict[str, str]] = []
+DISCOVERY_ERRORS: list[dict[str, str]] = []
 
 # PixArt PAW3311 encoding table used by the X11/X11SE receiver protocol.
 DPI_TABLE = [
@@ -43,6 +45,13 @@ DPI_TABLE = [
 
 class MouseError(RuntimeError):
     """Device discovery, permission, or protocol error suitable for CLI output."""
+
+    def __init__(self, message: str, *, code: str = "mouse_error", operation: str | None = None,
+                 details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.operation = operation
+        self.details = details or {}
 
 
 @contextlib.contextmanager
@@ -66,6 +75,7 @@ def ioctl_number(direction: int, number: int, size: int) -> int:
 
 
 def find_hidraw() -> str | None:
+    DISCOVERY_ERRORS.clear()
     candidates: list[tuple[str, str]] = []
     for sys_path in glob.glob("/sys/class/hidraw/hidraw*"):
         try:
@@ -78,7 +88,8 @@ def find_hidraw() -> str | None:
             with open(interface_file, encoding="ascii") as stream:
                 interface = stream.read().strip().lower()
             candidates.append((interface, "/dev/" + os.path.basename(sys_path)))
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError) as error:
+            DISCOVERY_ERRORS.append({"path": sys_path, "error": str(error)})
             continue
     return next((path for interface, path in candidates if interface in (INTERFACE, "2")), None)
 
@@ -86,13 +97,17 @@ def find_hidraw() -> str | None:
 def open_device(device: str | None = None) -> tuple[int, str]:
     path = device or find_hidraw()
     if not path:
-        raise MouseError("X11SE 2.4 GHz receiver was not found")
+        raise MouseError("X11SE 2.4 GHz receiver was not found", code="receiver_not_found",
+                         operation="open_device", details={"discovery_errors": DISCOVERY_ERRORS[:]})
     try:
         return os.open(path, os.O_RDWR | os.O_NONBLOCK), path
     except PermissionError as error:
-        raise MouseError(f"Permission denied opening {path}; check the X11SE hidraw rule") from error
+        raise MouseError(f"Permission denied opening {path}; check the X11SE hidraw rule",
+                         code="permission_denied", operation="open_device",
+                         details={"device": path, "errno": error.errno}) from error
     except OSError as error:
-        raise MouseError(f"Could not open {path}: {error.strerror}") from error
+        raise MouseError(f"Could not open {path}: {error.strerror}", code="device_open_failed",
+                         operation="open_device", details={"device": path, "errno": error.errno}) from error
 
 
 def send_feature(fd: int, report: bytes | bytearray) -> None:
@@ -100,7 +115,10 @@ def send_feature(fd: int, report: bytes | bytearray) -> None:
     try:
         fcntl.ioctl(fd, ioctl_number(3, 0x06, len(buffer)), buffer, True)
     except OSError as error:
-        raise MouseError(f"HID feature write failed: {error.strerror}") from error
+        raise MouseError(f"HID feature write failed: {error.strerror}", code="hid_feature_write_failed",
+                         operation="send_feature",
+                         details={"report_id": f"0x{buffer[0]:02x}" if buffer else None,
+                                  "errno": error.errno}) from error
 
 
 def read_feature(fd: int, report_id: int, length: int) -> bytearray:
@@ -113,15 +131,22 @@ def read_feature(fd: int, report_id: int, length: int) -> bytearray:
     try:
         fcntl.ioctl(fd, ioctl_number(3, 0x07, len(permission_response)), permission_response, True)
     except OSError as error:
-        raise MouseError(f"HID read-permission check failed: {error.strerror}") from error
+        raise MouseError(f"HID read-permission check failed: {error.strerror}",
+                         code="hid_permission_check_failed", operation="read_feature",
+                         details={"report_id": f"0x{report_id:02x}", "errno": error.errno}) from error
     if permission_response[1] != 1:
-        raise MouseError(f"Receiver denied read permission for report 0x{report_id:02x}")
+        raise MouseError(f"Receiver denied read permission for report 0x{report_id:02x}",
+                         code="hid_read_denied", operation="read_feature",
+                         details={"report_id": f"0x{report_id:02x}",
+                                  "permission_status": permission_response[1]})
     report = bytearray(length)
     report[0] = report_id
     try:
         fcntl.ioctl(fd, ioctl_number(3, 0x07, len(report)), report, True)
     except OSError as error:
-        raise MouseError(f"HID feature read failed: {error.strerror}") from error
+        raise MouseError(f"HID feature read failed: {error.strerror}", code="hid_feature_read_failed",
+                         operation="read_feature",
+                         details={"report_id": f"0x{report_id:02x}", "errno": error.errno}) from error
     return report
 
 
@@ -192,10 +217,12 @@ def decode_dpi_report(report: bytes | bytearray) -> dict[str, Any] | None:
 
 def update_dpi_report(report: bytes | bytearray, dpi: int) -> bytearray:
     if not valid_dpi_report(report):
-        raise MouseError("Receiver returned an invalid DPI report checksum")
+        raise MouseError("Receiver returned an invalid DPI report checksum", code="invalid_dpi_report",
+                         operation="decode_dpi_report", details={"report_id": f"0x{DPI_REPORT:02x}"})
     stage = report[24]
     if not 1 <= stage <= 8:
-        raise MouseError("Receiver returned an invalid active DPI stage")
+        raise MouseError("Receiver returned an invalid active DPI stage", code="invalid_dpi_stage",
+                         operation="decode_dpi_report", details={"stage": stage})
     x_byte, y_byte, double_flag, triple_flag = encode_dpi(dpi)
     updated = bytearray(report)
     index = stage - 1
@@ -245,16 +272,27 @@ def wait_for_command_confirmation(
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise MouseError(f"Receiver did not acknowledge report 0x{report_id:02x}")
-        ready, _, _ = select.select([fd], [], [], remaining)
+            raise MouseError(f"Receiver did not acknowledge report 0x{report_id:02x}",
+                             code="ack_timeout", operation="wait_for_command_confirmation",
+                             details={"report_id": f"0x{report_id:02x}", "timeout_seconds": timeout})
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining)
+        except OSError as error:
+            raise MouseError(f"Could not wait for receiver confirmation: {error.strerror}",
+                             code="confirmation_wait_failed", operation="wait_for_command_confirmation",
+                             details={"report_id": f"0x{report_id:02x}", "errno": error.errno}) from error
         if not ready:
-            raise MouseError(f"Receiver did not acknowledge report 0x{report_id:02x}")
+            raise MouseError(f"Receiver did not acknowledge report 0x{report_id:02x}",
+                             code="ack_timeout", operation="wait_for_command_confirmation",
+                             details={"report_id": f"0x{report_id:02x}", "timeout_seconds": timeout})
         try:
             data = os.read(fd, 128)
         except BlockingIOError:
             continue
         except OSError as error:
-            raise MouseError(f"Could not read receiver confirmation: {error.strerror}") from error
+            raise MouseError(f"Could not read receiver confirmation: {error.strerror}",
+                             code="confirmation_read_failed", operation="wait_for_command_confirmation",
+                             details={"report_id": f"0x{report_id:02x}", "errno": error.errno}) from error
         battery = parse_event(data)
         if battery:
             events.update(battery)
@@ -263,7 +301,9 @@ def wait_for_command_confirmation(
         if confirmation is None:
             continue
         if confirmation == 1:
-            raise MouseError(f"Receiver rejected report 0x{report_id:02x}")
+            raise MouseError(f"Receiver rejected report 0x{report_id:02x}", code="ack_rejected",
+                             operation="wait_for_command_confirmation",
+                             details={"report_id": f"0x{report_id:02x}"})
         return
 
 
@@ -273,7 +313,12 @@ def drain_events(fd: int, current: dict[str, Any], timeout: float = 0) -> bool:
     first = True
     while True:
         remaining = max(0, deadline - time.monotonic()) if timeout else 0
-        ready, _, _ = select.select([fd], [], [], remaining if first else 0)
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining if first else 0)
+        except OSError as error:
+            raise MouseError(f"Could not wait for receiver events: {error.strerror}",
+                             code="receiver_event_wait_failed", operation="drain_events",
+                             details={"errno": error.errno}) from error
         first = False
         if not ready:
             return changed
@@ -281,8 +326,10 @@ def drain_events(fd: int, current: dict[str, Any], timeout: float = 0) -> bool:
             event = parse_event(os.read(fd, 128))
         except BlockingIOError:
             continue
-        except OSError:
-            return changed
+        except OSError as error:
+            raise MouseError(f"Could not read receiver event: {error.strerror}",
+                             code="receiver_event_read_failed", operation="drain_events",
+                             details={"errno": error.errno}) from error
         if event:
             current.update(event)
             changed = True
@@ -292,7 +339,16 @@ def query_status(fd: int, battery: dict[str, Any] | None = None) -> dict[str, An
     with protocol_lock():
         dpi_report = read_feature(fd, DPI_REPORT, 56)
         dpi_info = decode_dpi_report(dpi_report)
+        if dpi_info is None:
+            raise MouseError("Receiver returned an invalid or undecodable DPI report",
+                             code="invalid_dpi_report", operation="query_status",
+                             details={"report_id": f"0x{DPI_REPORT:02x}"})
         polling_report = read_feature(fd, POLLING_REPORT, 9)
+        polling = decode_polling_report(polling_report)
+        if polling is None:
+            raise MouseError("Receiver returned an unknown polling-rate code",
+                             code="unknown_polling_rate", operation="query_status",
+                             details={"report_id": f"0x{POLLING_REPORT:02x}", "code": polling_report[3]})
     status: dict[str, Any] = {
         "connected": True,
         "battery": None,
@@ -300,7 +356,7 @@ def query_status(fd: int, battery: dict[str, Any] | None = None) -> dict[str, An
         "dpi": dpi_info["dpi"] if dpi_info else None,
         "stage": dpi_info["stage"] if dpi_info else None,
         "stages": dpi_info["stages"] if dpi_info else None,
-        "polling": decode_polling_report(polling_report),
+        "polling": polling,
         "error": None,
     }
     if battery:
@@ -310,21 +366,61 @@ def query_status(fd: int, battery: dict[str, Any] | None = None) -> dict[str, An
 
 def set_dpi(fd: int, value: int) -> dict[str, Any]:
     if not WRITES_ENABLED:
-        raise MouseError("X11SE setting writes are disabled because they disconnect the receiver")
+        raise MouseError("X11SE setting writes are disabled because they disconnect the receiver",
+                         code="writes_disabled", operation="set_dpi")
     with protocol_lock():
         before = read_feature(fd, DPI_REPORT, 56)
         updated = update_dpi_report(before, value)
         send_feature(fd, updated)
-        wait_for_command_confirmation(fd, DPI_REPORT)
-        info = decode_dpi_report(updated)
-        if not info or info["dpi"] != value:
-            raise MouseError("The DPI report could not be verified locally")
-        return {"stage": info["stage"], "dpi": info["dpi"], "stages": info["stages"]}
+        acknowledgement_error = None
+        try:
+            # This receiver sometimes applies the active DPI change but drops
+            # its 0x04 command confirmation. Keep the wait short and verify
+            # the actual feature report before deciding the write failed.
+            wait_for_command_confirmation(fd, DPI_REPORT, timeout=0.5)
+        except MouseError as error:
+            acknowledgement_error = error
+
+        info = None
+        read_error = None
+        for attempt in range(2):
+            if attempt:
+                time.sleep(0.2)
+            try:
+                info = decode_dpi_report(read_feature(fd, DPI_REPORT, 56))
+                if info and info["dpi"] == value:
+                    return {
+                        "stage": info["stage"], "dpi": info["dpi"],
+                        "stages": info["stages"],
+                        "verified": True,
+                        "acknowledged": acknowledgement_error is None,
+                    }
+            except MouseError as error:
+                read_error = error
+
+        if acknowledgement_error:
+            detail = f"{acknowledgement_error}; DPI readback was {(info['dpi'] if info else None)!r}"
+            if read_error:
+                detail += f" ({read_error})"
+            raise MouseError(detail, code="dpi_write_unverified", operation="set_dpi",
+                             details={"requested_dpi": value,
+                                      "readback_dpi": info["dpi"] if info else None,
+                                      "acknowledgement_error": str(acknowledgement_error),
+                                      "readback_error": str(read_error) if read_error else None}) from acknowledgement_error
+        if read_error:
+            raise MouseError(f"DPI change could not be verified: {read_error}",
+                             code="dpi_readback_failed", operation="set_dpi",
+                             details={"requested_dpi": value, "readback_error": str(read_error)}) from read_error
+        actual = info["dpi"] if info else None
+        raise MouseError(f"Receiver reported {actual!r} DPI after requesting {value}",
+                         code="dpi_readback_mismatch", operation="set_dpi",
+                         details={"requested_dpi": value, "readback_dpi": actual})
 
 
 def set_polling(fd: int, rate: int) -> tuple[int, bool]:
     if not WRITES_ENABLED:
-        raise MouseError("X11SE setting writes are disabled because they disconnect the receiver")
+        raise MouseError("X11SE setting writes are disabled because they disconnect the receiver",
+                         code="writes_disabled", operation="set_polling")
     with protocol_lock():
         # Remove delayed confirmations from earlier polling writes before the
         # next write, or an identical report ID can make an old ACK look fresh.
@@ -353,15 +449,37 @@ def set_polling(fd: int, rate: int) -> tuple[int, bool]:
             detail = f"{confirmation_error}; polling readback was {readback!r} Hz"
             if read_error:
                 detail += f" ({read_error})"
-            raise MouseError(detail) from confirmation_error
+            raise MouseError(detail, code="polling_write_unverified", operation="set_polling",
+                             details={"requested_hz": rate, "readback_hz": readback,
+                                      "acknowledgement_error": str(confirmation_error),
+                                      "readback_error": str(read_error) if read_error else None}) from confirmation_error
         if read_error:
-            raise MouseError(f"Polling rate could not be verified: {read_error}") from read_error
-        raise MouseError(f"Receiver reported {readback!r} Hz after requesting {rate} Hz")
+            raise MouseError(f"Polling rate could not be verified: {read_error}",
+                             code="polling_readback_failed", operation="set_polling",
+                             details={"requested_hz": rate, "readback_error": str(read_error)}) from read_error
+        raise MouseError(f"Receiver reported {readback!r} Hz after requesting {rate} Hz",
+                         code="polling_readback_mismatch", operation="set_polling",
+                         details={"requested_hz": rate, "readback_hz": readback})
 
 
-def device_error_status(error: str) -> dict[str, Any]:
-    return {"connected": False, "battery": None, "chargeState": None, "dpi": None,
-            "stage": None, "stages": None, "polling": None, "error": error}
+def device_error_status(error: str | BaseException, operation: str | None = None) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "connected": False, "battery": None, "chargeState": None, "dpi": None,
+        "stage": None, "stages": None, "polling": None, "error": str(error),
+    }
+    if isinstance(error, MouseError):
+        status.update({"errorCode": error.code, "operation": error.operation or operation,
+                       "details": error.details})
+    else:
+        code = "invalid_argument" if isinstance(error, ValueError) else (
+            "os_error" if isinstance(error, OSError) else "internal_error")
+        status.update({"errorCode": code,
+                       "operation": operation,
+                       "details": {"exception_type": type(error).__name__}})
+    cause = error.__cause__ if isinstance(error, BaseException) else None
+    if cause:
+        status["cause"] = f"{type(cause).__name__}: {cause}"
+    return status
 
 
 def json_line(value: dict[str, Any]) -> None:
@@ -370,8 +488,20 @@ def json_line(value: dict[str, Any]) -> None:
 
 def status_text(status: dict[str, Any]) -> str:
     if not status.get("connected"):
-        return "X11SE unavailable: " + str(status.get("error") or "receiver not found")
+        lines = ["X11SE unavailable: " + str(status.get("error") or "receiver not found")]
+        if status.get("errorCode"):
+            lines.append(f"Error code: {status['errorCode']}")
+        if status.get("operation"):
+            lines.append(f"Operation: {status['operation']}")
+        if status.get("details"):
+            lines.append("Details: " + json.dumps(status["details"], separators=(",", ":")))
+        if status.get("cause"):
+            lines.append("Cause: " + str(status["cause"]))
+        return "\n".join(lines)
     battery = "--" if status.get("battery") is None else f"{status['battery']}% ({status.get('chargeState') or 'status unknown'})"
     dpi = "--" if status.get("dpi") is None else f"{status['dpi']} DPI (stage {status['stage']})"
     polling = "--" if status.get("polling") is None else f"{status['polling']} Hz"
-    return f"Battery: {battery}\nDPI: {dpi}\nPolling: {polling}"
+    lines = [f"Battery: {battery}", f"DPI: {dpi}", f"Polling: {polling}"]
+    for warning in status.get("warnings", []):
+        lines.append("Warning: " + json.dumps(warning, separators=(",", ":")))
+    return "\n".join(lines)

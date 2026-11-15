@@ -1,14 +1,34 @@
 import sys
 import re
 import unittest
+import importlib.machinery
+import importlib.util
+import tempfile
 from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import x11se_mouse as mouse
 
+loader = importlib.machinery.SourceFileLoader("x11se_cli", str(Path(__file__).resolve().parents[1] / "bin/x11se-mouse"))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+cli = importlib.util.module_from_spec(spec)
+loader.exec_module(cli)
+
 
 class ProtocolTests(unittest.TestCase):
+    def test_cache_save_does_not_follow_preplaced_temp_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "victim"
+            target.write_text("unchanged")
+            cache = root / "x11se-mouse.json"
+            cache.with_suffix(".tmp").symlink_to(target)
+            with patch.object(cli, "cache_path", return_value=cache):
+                cli.save_cached_status({"battery": 55})
+            self.assertEqual(target.read_text(), "unchanged")
+            self.assertEqual(cache.read_text(), '{"battery":55}')
+
     def report(self):
         packet = bytearray(56)
         packet[0:3] = bytes([mouse.DPI_REPORT, 56, 1])
@@ -64,8 +84,8 @@ class ProtocolTests(unittest.TestCase):
 
     def test_panel_presets_match_verified_protocol_presets(self):
         panel = Path(__file__).resolve().parents[1].joinpath("Panel.qml").read_text(encoding="utf-8")
-        common = panel.split('text: "POLLING RATE"', 1)[0]
-        configured = tuple(int(value) for value in re.findall(r'\{ value: "(\d+)", label:', common))
+        configured = tuple(int(value) for value in re.search(r'property var defaultPresets:\s*\[([^]]+)\]', panel).group(1).split(','))
+        self.assertIn('model: root.presets', panel)
         self.assertEqual(configured, mouse.COMMON_DPI_PRESETS)
 
     def test_command_ack_matches_report_id_and_status(self):
