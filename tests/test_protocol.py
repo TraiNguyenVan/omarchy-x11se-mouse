@@ -6,6 +6,8 @@ import unittest
 import importlib.machinery
 import importlib.util
 import tempfile
+import os
+from types import SimpleNamespace
 from unittest.mock import patch, mock_open
 from pathlib import Path
 
@@ -22,7 +24,7 @@ loader.exec_module(cli)
 
 class ProtocolTests(unittest.TestCase):
     def test_cache_save_does_not_follow_preplaced_temp_symlink(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             root = Path(directory)
             target = root / "victim"
             target.write_text("unchanged")
@@ -32,6 +34,114 @@ class ProtocolTests(unittest.TestCase):
                 cli.save_cached_status({"battery": 55})
             self.assertEqual(target.read_text(), "unchanged")
             self.assertEqual(cache.read_text(), '{"battery":55}')
+
+    def test_private_cache_round_trip_and_permissions(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            cache = Path(directory) / "omarchy" / "x11se-mouse" / "status.json"
+            with patch.object(cli, "cache_path", return_value=cache):
+                cli.save_cached_status({"battery": 55})
+                self.assertEqual(cli.load_cached_status(), {"battery": 55})
+                self.assertEqual(cache.parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(cli.take_cache_warnings(), [])
+
+    def test_unsafe_directory_and_symlink_are_rejected(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            unsafe = root / "unsafe"
+            unsafe.mkdir(mode=0o777)
+            unsafe.chmod(0o777)
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            link.symlink_to(target, target_is_directory=True)
+            for base in (unsafe, link):
+                with self.subTest(base=base), patch.object(cli, "cache_path", return_value=base / "private" / "status.json"):
+                    cli.save_cached_status({"battery": 55})
+                    self.assertEqual(cli.take_cache_warnings()[0]["code"], "cache_unavailable")
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_foreign_owned_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            actual_fstat = os.fstat
+            def fstat(fd):
+                info = actual_fstat(fd)
+                if info.st_ino == root.stat().st_ino:
+                    return SimpleNamespace(st_uid=os.geteuid() + 1234, st_mode=info.st_mode)
+                return info
+            with patch.object(cli, "cache_path", return_value=root / "private" / "status.json"), \
+                 patch.object(cli.os, "fstat", side_effect=fstat):
+                cli.save_cached_status({"battery": 55})
+                self.assertEqual(cli.take_cache_warnings()[0]["code"], "cache_unavailable")
+            self.assertFalse((root / "private").exists())
+
+    def test_cache_file_symlink_is_not_read_or_written(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            target = root / "victim"
+            target.write_text('{"battery":99}')
+            cache = root / "status.json"
+            cache.symlink_to(target)
+            with patch.object(cli, "cache_path", return_value=cache):
+                self.assertIsNone(cli.load_cached_status()["battery"])
+                cli.save_cached_status({"battery": 55})
+                self.assertEqual(len(cli.take_cache_warnings()), 2)
+            self.assertEqual(target.read_text(), '{"battery":99}')
+            self.assertTrue(cache.is_symlink())
+
+    def test_replacing_cache_entry_during_save_does_not_follow_symlink(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            target = root / "victim"
+            target.write_text("unchanged")
+            cache = root / "status.json"
+            cache.write_text('{}')
+            replace = os.replace
+            def swap_before_replace(src, dst, **kwargs):
+                cache.unlink()
+                cache.symlink_to(target)
+                return replace(src, dst, **kwargs)
+            with patch.object(cli, "cache_path", return_value=cache), \
+                 patch.object(cli.os, "replace", side_effect=swap_before_replace):
+                cli.save_cached_status({"battery": 55})
+            self.assertEqual(target.read_text(), "unchanged")
+            self.assertFalse(cache.is_symlink())
+            self.assertEqual(json.loads(cache.read_text()), {"battery": 55})
+
+    def test_swapped_directory_does_not_redirect_write(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            external = root / "external"
+            external.mkdir()
+            cache = private / "status.json"
+            replace = os.replace
+            def swap_before_replace(src, dst, **kwargs):
+                private.rename(root / "moved")
+                private.symlink_to(external, target_is_directory=True)
+                return replace(src, dst, **kwargs)
+            with patch.object(cli, "cache_path", return_value=cache), \
+                 patch.object(cli.os, "replace", side_effect=swap_before_replace):
+                cli.save_cached_status({"battery": 55})
+            self.assertEqual(list(external.iterdir()), [])
+            self.assertEqual(json.loads((root / "moved" / "status.json").read_text()), {"battery": 55})
+
+    def test_status_continues_when_cache_is_unsafe(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            root.chmod(0o777)
+            device_fd = os.open(os.devnull, os.O_RDONLY)
+            with patch.object(cli, "cache_path", return_value=root / "private" / "status.json"), \
+                 patch.object(mouse, "open_device", return_value=(device_fd, "mock")), \
+                 patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+                 patch.object(mouse, "drain_events"), \
+                 patch.object(mouse, "query_status", return_value={"connected": True, "dpi": 800}):
+                result = cli.status_once(None)
+            self.assertTrue(result["connected"])
+            self.assertEqual(result["dpi"], 800)
+            self.assertTrue(any(w["code"] == "cache_unavailable" for w in result["warnings"]))
 
     def report(self):
         packet = bytearray(56)

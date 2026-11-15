@@ -18,6 +18,7 @@ BarWidget {
     property string errorMessage: ""
     property var panelItem: null
     property var capabilities: null
+    property bool cacheUnavailable: false
 
     readonly property string cliPath: Qt.resolvedUrl("bin/x11se-mouse").toString().replace("file://", "")
     readonly property string barLabel: {
@@ -38,8 +39,16 @@ BarWidget {
         return "Battery: " + batteryText + "\nDPI: " + dpiText + "\nPolling: " + rateText
     }
 
+    function applyCacheWarnings(value) {
+        if (!value || typeof value !== "object") return
+        cacheUnavailable = Array.isArray(value.warnings) && value.warnings.some(function(w) {
+            return w && w.code === "cache_unavailable"
+        })
+    }
+
     function applyStatus(value) {
         if (!value || typeof value !== "object") return
+        applyCacheWarnings(value)
         if (value.connected !== true) {
             deviceState = "disconnected"
             battery = -1

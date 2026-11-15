@@ -125,6 +125,7 @@ Item {
     function handleCommandResult(line) {
         var result
         try { result = JSON.parse(line) } catch (e) { return }
+        if (hostWidget && result.ok === true) hostWidget.applyCacheWarnings(result)
         if (result.ok !== true) {
             actionError = true
             actionMessage = queuedCommands.length ? "Previous setting failed; applying latest…"
@@ -516,14 +517,14 @@ Item {
             id: statusDot; x: Style.space(3.8); anchors.verticalCenter: statusText.verticalCenter
             width: Style.space(5.7); height: Style.space(5.7)
             color: root.actionError || (root.hostWidget && root.hostWidget.deviceState === "disconnected") ? Color.urgent
-                : (commandProcess.running || statusProcess.running || root.lowBattery ? "#e5b567" : Color.accent)
+                : (commandProcess.running || statusProcess.running || root.lowBattery || (root.hostWidget && root.hostWidget.cacheUnavailable) ? "#e5b567" : Color.accent)
         }
         Text {
             id: statusText
             anchors.left: statusDot.right; anchors.right: parent.right
             anchors.leftMargin: Style.space(8.55); y: (footerLine.y + parent.height + popup.padding - height) / 2; height: Style.space(25.65)
             textFormat: Text.PlainText; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter
-            text: root.actionMessage || (root.lowBattery ? "Battery low · " + hostWidget.battery + "%" : (root.connected ? "Last known settings" : "Receiver unavailable. Check the receiver and refresh."))
+            text: (root.hostWidget && root.hostWidget.cacheUnavailable && !root.actionError && !commandProcess.running && !statusProcess.running) ? "Status cache unavailable · check CLI warnings" : root.actionMessage || (root.lowBattery ? "Battery low · " + hostWidget.battery + "%" : (root.connected ? "Last known settings" : "Receiver unavailable. Check the receiver and refresh."))
             color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.72); font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Math.round(Style.font.body * 1.1)
         }
     }
