@@ -5,7 +5,6 @@ import array
 import contextlib
 import errno
 import fcntl
-import glob
 import json
 import os
 import select
@@ -13,15 +12,18 @@ import struct
 import time
 from typing import Any
 
-VENDOR_ID = "00001D57"
-PRODUCT_ID = "0000FA60"
-INTERFACE = "02"
+import hid_discovery
+from model_catalog import X11SE
+
+VENDOR_ID = X11SE["usb"]["vendor"]
+PRODUCT_ID = X11SE["usb"]["product"]
+INTERFACE = X11SE["usb"]["interface"]
 DPI_REPORT = 0x04
 POLLING_REPORT = 0x06
 READ_PERMISSION_REPORT = 0xA0
 POLLING_CODES = {125: 0x08, 250: 0x04, 500: 0x02, 1000: 0x01}
 CODE_POLLING = {value: key for key, value in POLLING_CODES.items()}
-COMMON_DPI_PRESETS = (400, 800, 1600, 2400, 3200, 5000, 22000)
+COMMON_DPI_PRESETS = tuple(X11SE["defaultPresets"])
 WRITES_ENABLED = True
 CACHE_WARNINGS: list[dict[str, str]] = []
 DISCOVERY_ERRORS: list[dict[str, str]] = []
@@ -75,23 +77,8 @@ def ioctl_number(direction: int, number: int, size: int) -> int:
 
 
 def find_hidraw() -> str | None:
-    DISCOVERY_ERRORS.clear()
-    candidates: list[tuple[str, str]] = []
-    for sys_path in glob.glob("/sys/class/hidraw/hidraw*"):
-        try:
-            with open(os.path.join(sys_path, "device", "uevent"), encoding="ascii") as stream:
-                uevent = stream.read()
-            if f"HID_ID=0003:{VENDOR_ID}:{PRODUCT_ID}" not in uevent:
-                continue
-            device_path = os.path.realpath(os.path.join(sys_path, "device"))
-            interface_file = os.path.join(os.path.dirname(device_path), "bInterfaceNumber")
-            with open(interface_file, encoding="ascii") as stream:
-                interface = stream.read().strip().lower()
-            candidates.append((interface, "/dev/" + os.path.basename(sys_path)))
-        except (OSError, UnicodeError) as error:
-            DISCOVERY_ERRORS.append({"path": sys_path, "error": str(error)})
-            continue
-    return next((path for interface, path in candidates if interface in (INTERFACE, "2")), None)
+    match = hid_discovery.find_hidraw((X11SE,), DISCOVERY_ERRORS)
+    return match[1] if match else None
 
 
 def open_device(device: str | None = None) -> tuple[int, str]:

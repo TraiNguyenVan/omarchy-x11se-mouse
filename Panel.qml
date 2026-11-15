@@ -18,15 +18,21 @@ Item {
     property int pollingDraft: -1
     property int appearance: 0
     property bool editingPresets: false
-    property var defaultPresets: [400, 800, 1600, 2400, 3200, 5000, 22000]
-    property var presets: defaultPresets.slice()
+    readonly property var capabilities: hostWidget ? hostWidget.capabilities : null
+    readonly property var defaultPresets: capabilities ? capabilities.defaultPresets : []
+    property var presets: []
+    property var storedPresets: null
     property var presetDraft: []
     property var savingPresets: []
     property bool presetSaving: false
     readonly property var presetChoices: verifiedDpi.concat(defaultPresets).filter(function(n, i, values) { return values.indexOf(n) === i }).sort(function(a, b) { return a - b })
-    readonly property var appearances: ["white", "white-line", "black", "black-line", "red", "berry-red"]
-    readonly property var swatches: ["#f4f3ee", "#c7c7c2", "#202127", "#55565e", "#d63b39", "#9d344e"]
-    readonly property var verifiedDpi: [50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1750, 9950, 12100, 19900, 20200, 22000]
+    readonly property var appearances: capabilities ? capabilities.appearances : []
+    readonly property var verifiedDpi: capabilities ? capabilities.verifiedDpi : []
+    readonly property var pollingRates: capabilities ? capabilities.pollingRates : []
+    onCapabilitiesChanged: if (capabilities) Qt.callLater(initializePresets)
+    function initializePresets() {
+        if (capabilities) presets = validPresets(storedPresets) ? storedPresets.slice() : defaultPresets.slice()
+    }
     readonly property bool connected: hostWidget && hostWidget.deviceState === "connected"
     readonly property bool lowBattery: hostWidget && hostWidget.battery >= 0 && hostWidget.battery <= 10
     readonly property var dpiOptions: {
@@ -64,7 +70,8 @@ Item {
         onLoaded: {
             try {
                 var stored = JSON.parse(text())
-                if (root.validPresets(stored)) root.presets = stored
+                root.storedPresets = stored
+                if (root.capabilities && root.validPresets(stored)) root.presets = stored
             } catch (e) { console.warn("X11SE: invalid preset file; using defaults") }
         }
         onSaved: {
@@ -225,7 +232,7 @@ Item {
         bar: root.bar
         open: hostWidget ? hostWidget.panelOpen : false
         contentWidth: fittedContentWidth(Style.space(712.5))
-        contentHeight: footerLine.y + Style.space(34) + verticalContentInset
+        contentHeight: footerLine.y + Style.space(28.5) + verticalContentInset
 
         Rectangle {
             id: visual
@@ -240,11 +247,11 @@ Item {
                 anchors.topMargin: Style.space(9.5)
                 width: Style.space(114.0); height: Style.space(218)
                 fillMode: Image.PreserveAspectFit
-                source: Qt.resolvedUrl("assets/mice/" + root.appearances[root.appearance] + ".png")
+                source: root.appearances.length ? Qt.resolvedUrl(root.appearances[root.appearance].asset) : ""
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.appearance = (root.appearance + 1) % root.appearances.length
+                    onClicked: if (root.appearances.length) root.appearance = (root.appearance + 1) % root.appearances.length
                 }
             }
             Row {
@@ -257,13 +264,13 @@ Item {
                     model: root.appearances
                     delegate: Rectangle {
                         required property int index
-                        required property string modelData
+                        required property var modelData
                         width: Style.space(12.35); height: Style.space(12.35)
-                        color: root.swatches[index]
+                        color: modelData.color
                         border.width: root.appearance === index ? 2 : 1
                         border.color: root.appearance === index ? Color.accent : Color.popups.border
                         Accessible.role: Accessible.Button
-                        Accessible.name: modelData.replace("-", " ") + " mouse illustration"
+                        Accessible.name: modelData.name.replace("-", " ") + " mouse illustration"
                         activeFocusOnTab: true
                         Keys.onReturnPressed: root.appearance = index
                         Keys.onSpacePressed: root.appearance = index
@@ -278,7 +285,7 @@ Item {
             x: visual.width + Style.space(19.0)
             y: 0
             width: popup.contentWidth - popup.padding * 2 - x
-            spacing: Style.space(15.2)
+            spacing: Style.space(13.5)
 
             Item {
                 width: parent.width; height: Style.space(51.3)
@@ -286,7 +293,7 @@ Item {
                     anchors.left: parent.left; anchors.right: refresh.left
                     anchors.rightMargin: Style.space(7.6)
                     Text {
-                        textFormat: Text.PlainText; text: "Attack Shark X11SE"
+                        textFormat: Text.PlainText; text: root.capabilities ? root.capabilities.name : "Attack Shark"
                         color: Color.foreground; font.family: root.bar ? root.bar.fontFamily : Style.font.family
                         font.pixelSize: Math.round(Style.font.body * 1.25); font.bold: true
                     }
@@ -417,10 +424,10 @@ Item {
                 Row {
                     id: rateRow; width: parent.width; spacing: Style.space(5.7)
                     Repeater {
-                        model: [125, 250, 500, 1000]
+                        model: root.pollingRates
                         delegate: PresetButton {
                             required property int modelData
-                            width: (rateRow.width - rateRow.spacing * 3) / 4
+                            width: (rateRow.width - rateRow.spacing * Math.max(0, root.pollingRates.length - 1)) / Math.max(1, root.pollingRates.length)
                             label: root.formatInteger(modelData) + " Hz"
                             selected: root.hostWidget && root.hostWidget.polling === modelData
                             pending: commandProcess.running && root.pendingAction === "set-polling" && root.pendingValue === String(modelData)

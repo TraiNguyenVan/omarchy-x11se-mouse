@@ -17,6 +17,7 @@ BarWidget {
     property string deviceState: "Searching for X11SE mouse"
     property string errorMessage: ""
     property var panelItem: null
+    property var capabilities: null
 
     readonly property string cliPath: Qt.resolvedUrl("bin/x11se-mouse").toString().replace("file://", "")
     readonly property string barLabel: {
@@ -53,10 +54,10 @@ BarWidget {
         deviceState = "connected"
         errorMessage = String(value.error || "")
         if (Number.isInteger(value.battery) && value.battery >= 0 && value.battery <= 100) battery = value.battery
-        if (Number.isInteger(value.dpi) && value.dpi > 0 && value.dpi <= 26000) dpi = value.dpi
-        if (Number.isInteger(value.polling) && [125, 250, 500, 1000].indexOf(value.polling) >= 0) polling = value.polling
-        if (Number.isInteger(value.stage) && value.stage >= 1 && value.stage <= 8) activeStage = value.stage
-        if (Array.isArray(value.stages) && value.stages.length === 8) stages = value.stages
+        if (Number.isInteger(value.dpi) && value.dpi > 0 && (!capabilities || value.dpi <= capabilities.maxReportedDpi)) dpi = value.dpi
+        if (Number.isInteger(value.polling) && (!capabilities || capabilities.pollingRates.indexOf(value.polling) >= 0)) polling = value.polling
+        if (Number.isInteger(value.stage) && value.stage >= 1 && (!capabilities || value.stage <= capabilities.stageCount)) activeStage = value.stage
+        if (Array.isArray(value.stages) && (!capabilities || value.stages.length === capabilities.stageCount)) stages = value.stages
         if (["charging", "charged", "normal"].indexOf(value.chargeState) >= 0) chargeState = value.chargeState
     }
 
@@ -103,6 +104,18 @@ BarWidget {
         tooltipText: root.statusTooltip
         onPressed: function(mouseButton) {
             if (mouseButton === Qt.LeftButton) root.togglePanel()
+        }
+    }
+
+    Process {
+        id: capabilityProcess
+        running: true
+        command: [root.cliPath, "capabilities"]
+        stdout: StdioCollector { id: capabilityOutput; waitForEnd: true }
+        onExited: function(code) {
+            if (code !== 0) { console.warn("X11SE: could not load model capabilities"); return }
+            try { root.capabilities = JSON.parse(capabilityOutput.text) }
+            catch (e) { console.warn("X11SE: invalid model capabilities", e) }
         }
     }
 

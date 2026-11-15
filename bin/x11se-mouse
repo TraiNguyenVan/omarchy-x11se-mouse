@@ -15,6 +15,7 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
 import x11se_mouse as mouse
+from model_catalog import X11SE
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("--debug", action="store_true", default=argparse.SUPPRESS,
                                     help="print Python tracebacks for errors")
 
+    commands.add_parser("capabilities", help="print X11SE model capabilities as JSON")
     status = commands.add_parser("status", help="read current battery, DPI, and polling rate")
     add_debug_option(status)
     status.add_argument("--json", action="store_true", help="print one JSON object")
@@ -168,6 +170,9 @@ def watch(device: str | None, debug: bool = False) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "capabilities":
+            print(json.dumps(X11SE, separators=(",", ":")))
+            return 0
         if args.command == "watch":
             return watch(args.device, args.debug)
         if args.command == "status":

@@ -1,14 +1,18 @@
 import sys
-import re
+import io
+import json
+import contextlib
 import unittest
 import importlib.machinery
 import importlib.util
 import tempfile
-from unittest.mock import patch
+from unittest.mock import patch, mock_open
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import x11se_mouse as mouse
+import hid_discovery
+from model_catalog import X11SE
 
 loader = importlib.machinery.SourceFileLoader("x11se_cli", str(Path(__file__).resolve().parents[1] / "bin/x11se-mouse"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -82,11 +86,37 @@ class ProtocolTests(unittest.TestCase):
                 self.assertEqual(mouse.decode_dpi_value(*encoded), dpi)
         self.assertEqual(mouse.COMMON_DPI_PRESETS, (400, 800, 1600, 2400, 3200, 5000, 22000))
 
-    def test_panel_presets_match_verified_protocol_presets(self):
-        panel = Path(__file__).resolve().parents[1].joinpath("Panel.qml").read_text(encoding="utf-8")
-        configured = tuple(int(value) for value in re.search(r'property var defaultPresets:\s*\[([^]]+)\]', panel).group(1).split(','))
-        self.assertIn('model: root.presets', panel)
-        self.assertEqual(configured, mouse.COMMON_DPI_PRESETS)
+    def test_capabilities_cli_matches_protocol_and_assets(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(mouse, "open_device", side_effect=AssertionError("unexpected HID access")):
+            self.assertEqual(cli.main(["capabilities"]), 0)
+        model = json.loads(output.getvalue())
+        self.assertEqual(model, X11SE)
+        self.assertEqual(tuple(model["defaultPresets"]), mouse.COMMON_DPI_PRESETS)
+        self.assertEqual(model["pollingRates"], sorted(mouse.POLLING_CODES))
+        for appearance in model["appearances"]:
+            self.assertTrue((Path(__file__).resolve().parents[1] / appearance["asset"]).is_file())
+
+    def test_discovery_matches_only_registered_identity_and_interface(self):
+        path = "/sys/class/hidraw/hidraw9"
+        def discover(identity, interface):
+            def open_file(name, *args, **kwargs):
+                content = f"HID_ID={identity}\n" if name.endswith("uevent") else interface
+                return mock_open(read_data=content)()
+            with patch.object(hid_discovery.glob, "glob", return_value=[path]), \
+                 patch.object(hid_discovery.os.path, "realpath", return_value="/sys/usb/1/device"), \
+                 patch("builtins.open", side_effect=open_file):
+                return hid_discovery.find_hidraw([X11SE], [])
+        self.assertEqual(discover("0003:00001D57:0000FA60", "02"), (X11SE, "/dev/hidraw9"))
+        self.assertIsNone(discover("0003:00001D57:0000FA61", "02"))
+        self.assertIsNone(discover("0003:00001D57:0000FA60", "01"))
+
+    def test_status_cli_json_contract(self):
+        expected = {"connected": True, "battery": 55, "dpi": 800, "polling": 500, "stage": 1}
+        output = io.StringIO()
+        with patch.object(cli, "status_once", return_value=expected), contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(["status", "--json"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), expected)
 
     def test_command_ack_matches_report_id_and_status(self):
         self.assertEqual(mouse.parse_command_confirmation(bytes([0, 0, 0x50, 0, 0x04]), 0x04), 0)
