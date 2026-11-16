@@ -31,6 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
                                     help="print Python tracebacks for errors")
 
     commands.add_parser("capabilities", help="print X11SE model capabilities as JSON")
+    commands.add_parser("get-presets", help="read saved DPI presets")
+    presets_parser = commands.add_parser("save-presets", help="save DPI presets")
+    presets_parser.add_argument("values", help="JSON array of seven distinct supported DPI values")
     status = commands.add_parser("status", help="read current battery, DPI, and polling rate")
     add_debug_option(status)
     status.add_argument("--json", action="store_true", help="print one JSON object")
@@ -71,17 +74,16 @@ def cache_path() -> Path:
 
 
 @contextlib.contextmanager
-def cache_directory():
+def secure_directory(path: Path, private: bool):
     """Open each trusted path component without following symlinks."""
-    path = cache_path()
     if not path.is_absolute() or ".." in path.parts:
-        raise OSError("Cache path must be absolute and contain no parent traversal")
+        raise OSError("Path must be absolute and contain no parent traversal")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open("/", flags)
     try:
         components = path.parent.parts[1:]
         for index, name in enumerate(components):
-            private = index == len(components) - 1
+            is_private = private and index == len(components) - 1
             try:
                 next_fd = os.open(name, flags, dir_fd=fd)
             except FileNotFoundError:
@@ -93,13 +95,17 @@ def cache_directory():
             os.close(fd)
             fd = next_fd
             info = os.fstat(fd)
-            owners = (os.geteuid(),) if private else (0, os.geteuid())
-            forbidden = 0o077 if private else 0o022
+            owners = (os.geteuid(),) if is_private else (0, os.geteuid())
+            forbidden = 0o077 if is_private else 0o022
             if info.st_uid not in owners or info.st_mode & forbidden:
-                raise PermissionError(f"Unsafe cache directory ownership or permissions: {name}")
+                raise PermissionError(f"Unsafe directory ownership or permissions: {name}")
         yield fd, path.name
     finally:
         os.close(fd)
+
+
+def cache_directory():
+    return secure_directory(cache_path(), private=True)
 
 
 def check_cache_file(fd: int, name: str) -> None:
@@ -158,6 +164,62 @@ def save_cached_status(status: dict) -> None:
                     pass
     except (OSError, ValueError) as error:
         cache_warning("save_status_cache", error)
+
+
+def presets_path() -> Path:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return config_home / "omarchy" / "x11se-presets.json"
+
+
+def valid_presets(values) -> bool:
+    choices = set(X11SE["verifiedDpi"] + X11SE["defaultPresets"])
+    return (isinstance(values, list) and len(values) == 7
+            and all(type(value) is int and value in choices for value in values)
+            and len(set(values)) == 7)
+
+
+def load_presets():
+    try:
+        with secure_directory(presets_path(), private=False) as (directory, name):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022 or info.st_nlink != 1:
+                    raise PermissionError("Unsafe presets file ownership, permissions, or type")
+                with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                    fd = -1
+                    values = json.loads(stream.read(4097))
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        if not valid_presets(values):
+            raise ValueError("Invalid saved DPI presets")
+        return values
+    except FileNotFoundError:
+        return None
+
+
+def save_presets(values):
+    if not valid_presets(values):
+        raise ValueError("DPI presets must be seven distinct supported values")
+    with secure_directory(presets_path(), private=False) as (directory, name):
+        try:
+            check_cache_file(directory, name)
+        except FileNotFoundError:
+            pass
+        temporary = ".x11se-presets-" + secrets.token_hex(16)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                json.dump(values, output, separators=(",", ":"))
+                output.write("\n")
+            os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
 
 
 def take_cache_warnings() -> list[dict[str, str]]:
@@ -232,6 +294,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "capabilities":
             print(json.dumps(X11SE, separators=(",", ":")))
+            return 0
+        if args.command == "get-presets":
+            print(json.dumps({"ok": True, "presets": load_presets()}))
+            return 0
+        if args.command == "save-presets":
+            save_presets(json.loads(args.values))
+            print(json.dumps({"ok": True}))
             return 0
         if args.command == "watch":
             return watch(args.device, args.debug)

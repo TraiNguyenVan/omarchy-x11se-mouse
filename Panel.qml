@@ -56,46 +56,52 @@ Item {
             .map(function(n) { return { value: String(n), label: formatInteger(n) + " DPI" } })
     }
     function savePresetDraft() {
-        if (presetSaving || !validPresets(presetDraft)) return
+        if (presetSaving || !validPresets(presetDraft) || !hostWidget) return
         savingPresets = presetDraft.slice()
-        var contents = JSON.stringify(savingPresets) + "\n"
-        if (presetFile.text() === contents) {
-            presets = savingPresets.slice()
-            editingPresets = false
-            actionError = false
-            actionMessage = "Presets already saved"
-            return
-        }
         presetSaving = true
         actionError = false
         actionMessage = "Saving presets…"
-        presetFile.setText(contents)
+        presetSaveProcess.command = [hostWidget.cliPath, "save-presets", JSON.stringify(savingPresets)]
+        presetSaveProcess.running = true
     }
 
-    FileView {
-        id: presetFile
-        path: (Quickshell.env("XDG_CONFIG_HOME") || Quickshell.env("HOME") + "/.config") + "/omarchy/x11se-presets.json"
-        atomicWrites: true
-        printErrors: false
-        onLoaded: {
+    Process {
+        id: presetLoadProcess
+        command: root.hostWidget ? [root.hostWidget.cliPath, "get-presets"] : []
+        running: root.hostWidget !== null
+        stdout: StdioCollector { id: presetLoadOutput; waitForEnd: true }
+        onExited: function(code) {
             try {
-                var stored = JSON.parse(text())
-                root.storedPresets = stored
-                if (root.capabilities && root.validPresets(stored)) root.presets = stored
-            } catch (e) { console.warn("X11SE: invalid preset file; using defaults") }
+                var result = JSON.parse(presetLoadOutput.text)
+                if (code !== 0 || result.ok !== true) throw new Error(result.error || "Could not read presets")
+                root.storedPresets = result.presets
+                root.initializePresets()
+            } catch (e) {
+                root.actionError = true
+                root.actionMessage = "Could not read presets; check your configuration directory"
+                console.warn("X11SE: failed to load presets:", e)
+            }
         }
-        onSaved: {
-            root.presets = root.savingPresets.slice()
+    }
+
+    Process {
+        id: presetSaveProcess
+        stdout: StdioCollector { id: presetSaveOutput; waitForEnd: true }
+        onExited: function(code) {
             root.presetSaving = false
-            root.editingPresets = false
-            root.actionError = false
-            root.actionMessage = "Presets saved"
-        }
-        onSaveFailed: function(error) {
-            root.presetSaving = false
-            root.actionError = true
-            root.actionMessage = "Could not save presets; check your configuration directory"
-            console.warn("X11SE: failed to save presets:", error)
+            try {
+                var result = JSON.parse(presetSaveOutput.text)
+                if (code !== 0 || result.ok !== true) throw new Error(result.error || "Could not save presets")
+                root.presets = root.savingPresets.slice()
+                root.storedPresets = root.presets.slice()
+                root.editingPresets = false
+                root.actionError = false
+                root.actionMessage = "Presets saved"
+            } catch (e) {
+                root.actionError = true
+                root.actionMessage = "Could not save presets; check your configuration directory"
+                console.warn("X11SE: failed to save presets:", e)
+            }
         }
     }
 

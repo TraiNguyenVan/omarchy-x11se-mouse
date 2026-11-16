@@ -143,6 +143,70 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(result["dpi"], 800)
             self.assertTrue(any(w["code"] == "cache_unavailable" for w in result["warnings"]))
 
+    def test_presets_existing_file_round_trip(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            path = Path(directory) / "omarchy" / "x11se-presets.json"
+            path.parent.mkdir()
+            values = X11SE["defaultPresets"]
+            path.write_text(json.dumps(values))
+            with patch.object(cli, "presets_path", return_value=path):
+                self.assertEqual(cli.load_presets(), values)
+                changed = [450] + values[1:]
+                cli.save_presets(changed)
+                self.assertEqual(cli.load_presets(), changed)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_presets_reject_symlinks_and_unsafe_directory(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            target = root / "victim"
+            target.write_text("unchanged")
+            path = root / "x11se-presets.json"
+            path.symlink_to(target)
+            with patch.object(cli, "presets_path", return_value=path):
+                with self.assertRaises(OSError): cli.load_presets()
+                with self.assertRaises(OSError): cli.save_presets(X11SE["defaultPresets"])
+            self.assertEqual(target.read_text(), "unchanged")
+            unsafe = root / "unsafe"
+            unsafe.mkdir(mode=0o777)
+            unsafe.chmod(0o777)
+            with patch.object(cli, "presets_path", return_value=unsafe / path.name):
+                with self.assertRaises(PermissionError): cli.save_presets(X11SE["defaultPresets"])
+            self.assertFalse((unsafe / path.name).exists())
+            link = root / "link"
+            link.symlink_to(unsafe, target_is_directory=True)
+            with patch.object(cli, "presets_path", return_value=link / path.name):
+                with self.assertRaises(OSError): cli.save_presets(X11SE["defaultPresets"])
+
+    def test_presets_entry_swap_does_not_write_target(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            path = root / "x11se-presets.json"
+            target = root / "victim"
+            path.write_text("[]")
+            target.write_text("unchanged")
+            replace = os.replace
+            def swap(src, dst, **kwargs):
+                path.unlink()
+                path.symlink_to(target)
+                return replace(src, dst, **kwargs)
+            with patch.object(cli, "presets_path", return_value=path), patch.object(cli.os, "replace", side_effect=swap):
+                cli.save_presets(X11SE["defaultPresets"])
+            self.assertEqual(target.read_text(), "unchanged")
+            self.assertEqual(json.loads(path.read_text()), X11SE["defaultPresets"])
+
+    def test_presets_cli_reports_unsafe_path_and_rejects_invalid_values(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory)
+            root.chmod(0o777)
+            with patch.object(cli, "presets_path", return_value=root / "presets.json"):
+                for args in (["get-presets"], ["save-presets", json.dumps(X11SE["defaultPresets"])]):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(cli.main(args), 2)
+                    self.assertFalse(json.loads(output.getvalue())["ok"])
+            with self.assertRaises(ValueError): cli.save_presets([800] * 7)
+
     def report(self):
         packet = bytearray(56)
         packet[0:3] = bytes([mouse.DPI_REPORT, 56, 1])
