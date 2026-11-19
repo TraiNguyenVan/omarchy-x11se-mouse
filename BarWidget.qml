@@ -14,6 +14,7 @@ BarWidget {
     property int activeStage: 0
     property var stages: []
     property string chargeState: ""
+    property string transport: ""
     property string deviceState: "Searching for X11SE mouse"
     property string errorMessage: ""
     property var panelItem: null
@@ -61,6 +62,11 @@ BarWidget {
             return
         }
         deviceState = "connected"
+        if (value.transport && value.transport !== transport) {
+            battery = -1
+            chargeState = ""
+            transport = value.transport
+        }
         errorMessage = String(value.error || "")
         if (Number.isInteger(value.battery) && value.battery >= 0 && value.battery <= 100) battery = value.battery
         if (Number.isInteger(value.dpi) && value.dpi > 0 && (!capabilities || value.dpi <= capabilities.maxReportedDpi)) dpi = value.dpi

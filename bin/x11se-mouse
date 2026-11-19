@@ -17,7 +17,7 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
 import x11se_mouse as mouse
-from model_catalog import X11SE
+from model_catalog import X11SE, X11SE_WIRED
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
                                     help="print Python tracebacks for errors")
 
     commands.add_parser("capabilities", help="print X11SE model capabilities as JSON")
+    commands.add_parser("devices", help="detect receiver and wired interfaces without sending HID commands")
+    commands.add_parser("probe-wired", help="read the wired device version using the vendor read handshake")
+    commands.add_parser("wired-status", help="read wired DPI and polling rate without changing settings")
     commands.add_parser("get-presets", help="read saved DPI presets")
     presets_parser = commands.add_parser("save-presets", help="save DPI presets")
     presets_parser.add_argument("values", help="JSON array of seven distinct supported DPI values")
@@ -49,8 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def status_once(device: str | None) -> dict:
-    fd, _ = mouse.open_device(device)
+    fd, path = mouse.open_device(device)
     try:
+        if mouse.is_wired(path):
+            result = mouse.wired_status(fd)
+            with mouse.protocol_lock():
+                mouse.drain_events(fd, result, timeout=0.2)
+            return result
         cached = load_cached_status()
         battery = {key: cached[key] for key in ("battery", "chargeState") if cached.get(key) is not None}
         with mouse.protocol_lock():
@@ -232,10 +240,12 @@ def watch(device: str | None, debug: bool = False) -> int:
     while True:
         path = device or mouse.find_hidraw()
         if not path:
-            status = mouse.device_error_status(mouse.MouseError(
-                "X11SE 2.4 GHz receiver was not found", code="receiver_not_found",
-                operation="watch_discovery",
-                details={"discovery_errors": mouse.DISCOVERY_ERRORS[:]}))
+            wired = mouse.hid_discovery.find_hidraw((X11SE_WIRED,), [])
+            error = (mouse.MouseError("X11SE USB cable could not be opened", code="wired_open_failed")
+                     if wired else mouse.MouseError("X11SE 2.4 GHz receiver was not found",
+                                                    code="receiver_not_found",
+                                                    details={"discovery_errors": mouse.DISCOVERY_ERRORS[:]}))
+            status = mouse.device_error_status(error, "watch_discovery")
             mouse.json_line(status)
             time.sleep(3)
             continue
@@ -249,22 +259,32 @@ def watch(device: str | None, debug: bool = False) -> int:
             time.sleep(5)
             continue
         try:
-            status = load_cached_status()
+            wired = mouse.is_wired(path)
+            status = mouse.wired_status(fd) if wired else load_cached_status()
+            status["transport"] = "wired" if wired else "receiver"
             status.update({"connected": True, "error": None})
             with mouse.protocol_lock():
                 changed = mouse.drain_events(fd, status, timeout=0.2)
             if changed:
                 status.pop("warnings", None)
-                save_cached_status(status)
+                if not wired:
+                    save_cached_status(status)
             warnings = take_cache_warnings()
             status.pop("warnings", None)
             if warnings:
                 status["warnings"] = warnings
             mouse.json_line(status)
             while os.path.exists(path):
+                if not device and mouse.find_hidraw() != path:
+                    break
                 with mouse.protocol_lock():
                     changed = mouse.drain_events(fd, status, timeout=0.2)
                 if changed:
+                    if wired:
+                        mouse.json_line({"connected": True, "transport": "wired", "error": None,
+                                         "battery": status.get("battery"),
+                                         "chargeState": status.get("chargeState")})
+                        continue
                     cached = load_cached_status()
                     cached.pop("warnings", None)
                     cached.update({
@@ -295,6 +315,37 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "capabilities":
             print(json.dumps(X11SE, separators=(",", ":")))
             return 0
+        if args.command == "devices":
+            devices = []
+            errors = []
+            for model, transport, supported in ((X11SE, "receiver", True), (X11SE_WIRED, "wired", True)):
+                discovery_errors = []
+                match = mouse.hid_discovery.find_hidraw((model,), discovery_errors)
+                errors.extend(discovery_errors)
+                if match:
+                    devices.append({"transport": transport, "device": match[1], "supported": supported})
+            print(json.dumps({"devices": devices, "discovery_errors": errors}, separators=(",", ":")))
+            return 0
+        if args.command in ("probe-wired", "wired-status"):
+            match = mouse.hid_discovery.find_hidraw((X11SE_WIRED,), [])
+            if not match:
+                raise mouse.MouseError("X11SE wired interface was not found", code="wired_not_found")
+            try:
+                fd = os.open(match[1], os.O_RDWR | os.O_NONBLOCK)
+            except OSError as error:
+                raise mouse.MouseError(f"Could not open wired interface {match[1]}: {error.strerror}",
+                                       code="wired_open_failed") from error
+            try:
+                if args.command == "probe-wired":
+                    with mouse.protocol_lock():
+                        report = mouse.read_wired_feature(fd, 0x0b, 8, profile=0)
+                    result = {"device": match[1], "report": report.hex()}
+                else:
+                    result = mouse.wired_status(fd)
+                print(json.dumps(result, separators=(",", ":")))
+                return 0
+            finally:
+                os.close(fd)
         if args.command == "get-presets":
             print(json.dumps({"ok": True, "presets": load_presets()}))
             return 0
@@ -313,8 +364,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result["connected"] else 1
         if args.command in ("set-dpi", "set-polling") and not mouse.WRITES_ENABLED:
             raise mouse.MouseError("X11SE setting writes are disabled because they disconnect the receiver")
-        fd, _ = mouse.open_device(args.device)
+        fd, path = mouse.open_device(args.device)
         try:
+            if mouse.is_wired(path):
+                result = mouse.set_wired(fd, args.command, args.value)
+                result.update({"ok": True, "message": f"{args.command[4:].capitalize()} set to {args.value}"})
+                print(json.dumps(result, separators=(",", ":")))
+                return 0
             if args.command == "set-dpi":
                 changed = mouse.set_dpi(fd, args.value)
                 result = {"ok": True, **changed,

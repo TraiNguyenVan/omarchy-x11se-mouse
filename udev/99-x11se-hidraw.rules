@@ -1,2 +1,3 @@
 # Grant the logged-in input-group user access to X11SE settings reports.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1d57", ATTRS{idProduct}=="fa60", ENV{ID_USB_INTERFACE_NUM}=="02", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1d57", ATTRS{idProduct}=="2125", ENV{ID_USB_INTERFACE_NUM}=="02", GROUP="input", MODE="0660"

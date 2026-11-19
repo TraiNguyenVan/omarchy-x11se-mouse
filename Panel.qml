@@ -34,6 +34,7 @@ Item {
         if (capabilities) presets = validPresets(storedPresets) ? storedPresets.slice() : defaultPresets.slice()
     }
     readonly property bool connected: hostWidget && hostWidget.deviceState === "connected"
+    readonly property var transportLabels: ({wired: "USB wired", receiver: "Wireless receiver"})
     readonly property bool lowBattery: hostWidget && hostWidget.battery >= 0 && hostWidget.battery <= 10
     readonly property var dpiOptions: {
         var values = verifiedDpi.map(function(n) { return { value: String(n), label: formatInteger(n) + " DPI" } })
@@ -316,8 +317,9 @@ Item {
                     }
                     Text {
                         width: parent.width; elide: Text.ElideRight; textFormat: Text.PlainText
-                        text: root.connected ? "Wireless receiver · Stage " + (hostWidget.activeStage || "—")
-                            : (hostWidget && hostWidget.errorMessage ? hostWidget.errorMessage : "Connecting to receiver…")
+                        text: root.connected ? (root.transportLabels[hostWidget.transport] || "X11SE mouse")
+                                              + " · DPI slot " + (hostWidget.activeStage || "—")
+                            : (hostWidget && hostWidget.errorMessage ? hostWidget.errorMessage : "Connecting to mouse…")
                         color: root.connected ? Color.accent : Color.muted
                         font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Math.round(Style.font.body * 1.1)
                     }

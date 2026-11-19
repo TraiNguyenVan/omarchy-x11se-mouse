@@ -31,7 +31,7 @@ fi
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=hidraw
 
-echo "Installed the X11SE hidraw rule for $target_user. Reconnect the receiver."
+echo "Installed the X11SE hidraw rule for $target_user. Reconnect the receiver or USB cable."
 if [[ "$relogin" == true ]]; then
   echo "The account was added to the input group; log out and back in before using the plugin."
 fi

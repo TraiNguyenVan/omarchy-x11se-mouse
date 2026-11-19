@@ -1,5 +1,11 @@
 """Verified model identity and UI capabilities; no HID access occurs here."""
 
+# Identity observed on the directly connected X11SE; its protocol is unverified.
+X11SE_WIRED = {
+    "id": "x11se-wired",
+    "usb": {"vendor": "00001D57", "product": "00002125", "interface": "02"},
+}
+
 X11SE = {
     "id": "x11se",
     "name": "Attack Shark X11SE",

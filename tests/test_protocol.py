@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import x11se_mouse as mouse
 import hid_discovery
-from model_catalog import X11SE
+from model_catalog import X11SE, X11SE_WIRED
 
 loader = importlib.machinery.SourceFileLoader("x11se_cli", str(Path(__file__).resolve().parents[1] / "bin/x11se-mouse"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -284,6 +284,109 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(discover("0003:00001D57:0000FA60", "02"), (X11SE, "/dev/hidraw9"))
         self.assertIsNone(discover("0003:00001D57:0000FA61", "02"))
         self.assertIsNone(discover("0003:00001D57:0000FA60", "01"))
+
+    def test_wired_device_is_selected_over_receiver(self):
+        def discovery(models, errors):
+            return (X11SE_WIRED, "/dev/hidraw8") if models == (X11SE_WIRED,) else None
+        with patch.object(hid_discovery, "find_hidraw", side_effect=discovery):
+            self.assertEqual(mouse.find_hidraw(), "/dev/hidraw8")
+            self.assertTrue(mouse.is_wired("/dev/hidraw8"))
+
+    def test_discovery_falls_back_to_receiver_after_wired_removal(self):
+        def discovery(models, errors):
+            return (X11SE, "/dev/hidraw2") if models == (X11SE,) else None
+        with patch.object(hid_discovery, "find_hidraw", side_effect=discovery):
+            self.assertEqual(mouse.find_hidraw(), "/dev/hidraw2")
+            self.assertFalse(mouse.is_wired("/dev/hidraw2"))
+
+    def test_devices_reports_both_transports_without_opening_hid(self):
+        def discovery(models, errors):
+            return (models[0], "/dev/hidraw2" if models[0] is X11SE else "/dev/hidraw8")
+        output = io.StringIO()
+        with patch.object(hid_discovery, "find_hidraw", side_effect=discovery), \
+             patch.object(mouse, "open_device", side_effect=AssertionError("unexpected HID access")), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(["devices"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["devices"], [
+            {"transport": "receiver", "device": "/dev/hidraw2", "supported": True},
+            {"transport": "wired", "device": "/dev/hidraw8", "supported": True},
+        ])
+
+    def test_wired_version_probe_uses_vendor_read_sequence(self):
+        output = io.StringIO()
+        report = bytearray.fromhex("0b08000701000000")
+        with patch.object(hid_discovery, "find_hidraw", return_value=(X11SE_WIRED, "/dev/hidraw8")), \
+             patch.object(cli.os, "open", return_value=42), patch.object(cli.os, "close") as close, \
+             patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "read_wired_feature", return_value=report) as read, contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(["probe-wired"]), 0)
+        read.assert_called_once_with(42, 0x0b, 8, profile=0)
+        close.assert_called_once_with(42)
+        self.assertEqual(json.loads(output.getvalue())["report"], report.hex())
+
+    def test_feature_read_uses_requested_profile_in_handshake(self):
+        calls = []
+        def ioctl(fd, request, buffer, mutate):
+            calls.append(bytes(buffer))
+            if len(calls) == 2:
+                buffer[1] = 1
+        with patch.object(mouse.fcntl, "ioctl", side_effect=ioctl), patch.object(mouse.time, "sleep"):
+            mouse.read_feature(42, 0x0b, 8, profile=0)
+        self.assertEqual(calls[0], bytes.fromhex("a00b080000000000"))
+        self.assertEqual(calls[1], bytes.fromhex("a000000000000000"))
+        self.assertEqual(calls[2], bytes.fromhex("0b00000000000000"))
+
+    def test_wired_status_decodes_observed_reports(self):
+        reports = [bytearray.fromhex(value) for value in (
+            "0b08010700000000", "06090102fd00000000",
+            "04380100013f20201225384b75810000000000000001000001ff000000ff000000ffffff0000ffffff00ffff4000ffffff020f6700000000")]
+        with patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "read_wired_feature", side_effect=reports):
+            status = mouse.wired_status(42)
+        self.assertEqual((status["dpi"], status["polling"], status["stage"]), (800, 500, 1))
+
+    def test_wired_read_retries_only_stalled_handshake(self):
+        import errno
+        stalled = mouse.MouseError("stalled", details={"errno": errno.EPIPE})
+        report = bytearray.fromhex("06090102fd00000000")
+        with patch.object(mouse, "read_feature", side_effect=[stalled, report]) as read, \
+             patch.object(mouse.time, "sleep"):
+            self.assertEqual(mouse.read_wired_feature(42, 6, 9), report)
+        self.assertEqual(read.call_count, 2)
+
+    def test_wired_read_rejects_another_profile(self):
+        other = bytearray.fromhex("06090201fe00000000")
+        expected = bytearray.fromhex("06090102fd00000000")
+        with patch.object(mouse, "read_feature", side_effect=[other, expected]), \
+             patch.object(mouse.time, "sleep"):
+            self.assertEqual(mouse.read_wired_feature(42, 6, 9), expected)
+
+    def test_receiver_retries_transient_read_denial(self):
+        denied = mouse.MouseError("not ready", code="hid_read_denied")
+        report = bytearray.fromhex("06090102fd00000000")
+        with patch.object(mouse, "read_feature", side_effect=[denied, report]) as read, \
+             patch.object(mouse.time, "sleep"):
+            self.assertEqual(mouse.read_receiver_feature(42, 6, 9), report)
+        self.assertEqual(read.call_count, 2)
+
+    def test_wired_polling_write_is_verified(self):
+        version = bytearray.fromhex("0b08010700000000")
+        polling = bytearray.fromhex("06090104fb00000000")
+        with patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "read_wired_feature", side_effect=[version, polling]), \
+             patch.object(mouse, "send_feature") as send, patch.object(mouse.time, "sleep"):
+            result = mouse.set_wired(42, "set-polling", 250)
+        send.assert_called_once_with(42, mouse.encode_polling_report(250))
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["polling"], 250)
+
+    def test_wired_write_rejects_other_model(self):
+        version = bytearray.fromhex("0b08010800000000")
+        with patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "read_wired_feature", return_value=version), \
+             patch.object(mouse, "send_feature") as send, self.assertRaises(mouse.MouseError):
+            mouse.set_wired(42, "set-polling", 250)
+        send.assert_not_called()
 
     def test_status_cli_json_contract(self):
         expected = {"connected": True, "battery": 55, "dpi": 800, "polling": 500, "stage": 1}

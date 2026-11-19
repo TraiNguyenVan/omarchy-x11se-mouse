@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 import hid_discovery
-from model_catalog import X11SE
+from model_catalog import X11SE, X11SE_WIRED
 
 VENDOR_ID = X11SE["usb"]["vendor"]
 PRODUCT_ID = X11SE["usb"]["product"]
@@ -77,8 +77,16 @@ def ioctl_number(direction: int, number: int, size: int) -> int:
 
 
 def find_hidraw() -> str | None:
+    wired = hid_discovery.find_hidraw((X11SE_WIRED,), [])
+    if wired:
+        return wired[1]
     match = hid_discovery.find_hidraw((X11SE,), DISCOVERY_ERRORS)
     return match[1] if match else None
+
+
+def is_wired(path: str) -> bool:
+    wired = hid_discovery.find_hidraw((X11SE_WIRED,), [])
+    return bool(wired and os.path.realpath(path) == os.path.realpath(wired[1]))
 
 
 def open_device(device: str | None = None) -> tuple[int, str]:
@@ -108,9 +116,9 @@ def send_feature(fd: int, report: bytes | bytearray) -> None:
                                   "errno": error.errno}) from error
 
 
-def read_feature(fd: int, report_id: int, length: int) -> bytearray:
+def read_feature(fd: int, report_id: int, length: int, profile: int = 1) -> bytearray:
     # The receiver grants a one-shot read before each feature report request.
-    permission = bytearray([READ_PERMISSION_REPORT, report_id, length, 0, 1, 0, 0, 0])
+    permission = bytearray([READ_PERMISSION_REPORT, report_id, length, 0, profile, 0, 0, 0])
     send_feature(fd, permission)
     time.sleep(0.25)
     permission_response = bytearray(8)
@@ -135,6 +143,82 @@ def read_feature(fd: int, report_id: int, length: int) -> bytearray:
                          operation="read_feature",
                          details={"report_id": f"0x{report_id:02x}", "errno": error.errno}) from error
     return report
+
+
+def read_wired_feature(fd: int, report_id: int, length: int, profile: int = 1) -> bytearray:
+    # The vendor retries stalled read requests; never retry settings writes here.
+    for attempt in range(5):
+        try:
+            report = read_feature(fd, report_id, length, profile)
+            if (report[0] != report_id or report[1] != length or
+                    (report_id == 0x0b and report[3] != 7) or
+                    (report_id != 0x0b and report[2] != profile)):
+                raise MouseError("Unexpected wired feature report", code="invalid_wired_report")
+            return report
+        except MouseError as error:
+            if (error.details.get("errno") != errno.EPIPE and error.code != "invalid_wired_report") or attempt == 4:
+                raise
+            time.sleep(0.5)
+
+
+def read_receiver_feature(fd: int, report_id: int, length: int) -> bytearray:
+    # The receiver may briefly deny reads immediately after switching from USB.
+    for attempt in range(3):
+        try:
+            return read_feature(fd, report_id, length)
+        except MouseError as error:
+            if error.code != "hid_read_denied" or attempt == 2:
+                raise
+            time.sleep(0.5)
+
+
+def wired_status(fd: int) -> dict[str, Any]:
+    with protocol_lock():
+        version = read_wired_feature(fd, 0x0b, 8, 0)
+        if version[3] != 7:
+            raise MouseError("Wired device did not identify as an X11SE", code="unexpected_wired_model")
+        polling_report = read_wired_feature(fd, POLLING_REPORT, 9)
+        dpi_report = read_wired_feature(fd, DPI_REPORT, 56)
+    dpi = decode_dpi_report(dpi_report)
+    polling = decode_polling_report(polling_report)
+    if dpi is None or polling is None or polling_report[4] != (~polling_report[3] & 0xff):
+        raise MouseError("Invalid wired settings report", code="invalid_wired_report")
+    return {"connected": True, "transport": "wired", "battery": None, "chargeState": None,
+            "polling": polling, "error": None, **dpi}
+
+
+def set_wired(fd: int, name: str, value: int) -> dict[str, Any]:
+    with protocol_lock():
+        version = read_wired_feature(fd, 0x0b, 8, 0)
+        if version[3] != 7:
+            raise MouseError("Wired device did not identify as an X11SE", code="unexpected_wired_model")
+        report_id, length = (DPI_REPORT, 56) if name == "set-dpi" else (POLLING_REPORT, 9)
+        if report_id == DPI_REPORT:
+            report = update_dpi_report(read_wired_feature(fd, report_id, length), value)
+        else:
+            report = encode_polling_report(value)
+        for attempt in range(5):
+            try:
+                send_feature(fd, report)
+                break
+            except MouseError as error:
+                if error.details.get("errno") != errno.EPIPE or attempt == 4:
+                    raise
+                time.sleep(0.5)
+        for attempt in range(5):
+            time.sleep(0.5)
+            try:
+                readback = read_wired_feature(fd, report_id, length)
+                if report_id == DPI_REPORT:
+                    result = decode_dpi_report(readback)
+                    if result and result["dpi"] == value:
+                        return {**result, "verified": True, "acknowledged": False}
+                elif decode_polling_report(readback) == value and readback[4] == (~readback[3] & 0xff):
+                    return {"polling": value, "verified": True, "acknowledged": False}
+            except MouseError as error:
+                if error.code not in ("invalid_wired_report", "hid_read_denied") and error.details.get("errno") != errno.EPIPE:
+                    raise
+        raise MouseError("Wired setting could not be confirmed by readback", code="wired_write_unverified")
 
 
 def valid_dpi_report(report: bytes | bytearray) -> bool:
@@ -324,13 +408,13 @@ def drain_events(fd: int, current: dict[str, Any], timeout: float = 0) -> bool:
 
 def query_status(fd: int, battery: dict[str, Any] | None = None) -> dict[str, Any]:
     with protocol_lock():
-        dpi_report = read_feature(fd, DPI_REPORT, 56)
+        dpi_report = read_receiver_feature(fd, DPI_REPORT, 56)
         dpi_info = decode_dpi_report(dpi_report)
         if dpi_info is None:
             raise MouseError("Receiver returned an invalid or undecodable DPI report",
                              code="invalid_dpi_report", operation="query_status",
                              details={"report_id": f"0x{DPI_REPORT:02x}"})
-        polling_report = read_feature(fd, POLLING_REPORT, 9)
+        polling_report = read_receiver_feature(fd, POLLING_REPORT, 9)
         polling = decode_polling_report(polling_report)
         if polling is None:
             raise MouseError("Receiver returned an unknown polling-rate code",
