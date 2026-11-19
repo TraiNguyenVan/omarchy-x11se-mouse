@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("devices", help="detect receiver and wired interfaces without sending HID commands")
     commands.add_parser("probe-wired", help="read the wired device version using the vendor read handshake")
     commands.add_parser("wired-status", help="read wired DPI and polling rate without changing settings")
+    commands.add_parser("get-lighting", help="read wireless LED color")
+    light_parser = commands.add_parser("set-light-color", help="set wireless LED color (#RRGGBB)")
+    light_parser.add_argument("value")
+    power_parser = commands.add_parser("set-light-power", help="turn the wireless LED on or off")
+    power_parser.add_argument("value", choices=("on", "off"))
     commands.add_parser("get-presets", help="read saved DPI presets")
     presets_parser = commands.add_parser("save-presets", help="save DPI presets")
     presets_parser.add_argument("values", help="JSON array of seven distinct supported DPI values")
@@ -362,10 +367,23 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(mouse.status_text(result))
             return 0 if result["connected"] else 1
-        if args.command in ("set-dpi", "set-polling") and not mouse.WRITES_ENABLED:
+        if args.command in ("set-dpi", "set-polling", "set-light-color", "set-light-power") and not mouse.WRITES_ENABLED:
             raise mouse.MouseError("X11SE setting writes are disabled because they disconnect the receiver")
         fd, path = mouse.open_device(args.device)
         try:
+            if args.command in ("get-lighting", "set-light-color", "set-light-power"):
+                if mouse.is_wired(path):
+                    raise mouse.MouseError("LED control is not yet verified for USB", code="lighting_unsupported_transport")
+                if args.command == "get-lighting":
+                    with mouse.protocol_lock():
+                        report = mouse.read_lighting(fd)
+                    result = {"color": mouse.lighting_color(report), "power": mouse.lighting_power(report)}
+                elif args.command == "set-light-color":
+                    result = mouse.set_lighting_color(fd, args.value)
+                else:
+                    result = mouse.set_lighting_power(fd, args.value)
+                print(json.dumps({"ok": True, **result}, separators=(",", ":")))
+                return 0
             if mouse.is_wired(path):
                 result = mouse.set_wired(fd, args.command, args.value)
                 result.update({"ok": True, "message": f"{args.command[4:].capitalize()} set to {args.value}"})

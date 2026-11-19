@@ -172,6 +172,59 @@ def read_receiver_feature(fd: int, report_id: int, length: int) -> bytearray:
             time.sleep(0.5)
 
 
+def read_lighting(fd: int) -> bytearray:
+    report = read_receiver_feature(fd, 0x05, 15)
+    if (report[:3] != bytes((5, 15, 1)) or
+            int.from_bytes(report[11:13], "big") != sum(report[3:11])):
+        raise MouseError("Invalid lighting report", code="invalid_lighting_report")
+    return report
+
+
+def lighting_color(report: bytes | bytearray) -> str:
+    return "#" + bytes(report[6:9]).hex()
+
+
+def lighting_power(report: bytes | bytearray) -> str:
+    return {0: "off", 1: "on"}.get(report[3] >> 4, "unsupported")
+
+
+def write_lighting(fd: int, report: bytearray) -> bytearray:
+    report[11:13] = sum(report[3:11]).to_bytes(2, "big")
+    send_feature(fd, report)
+    for attempt in range(3):
+        time.sleep(0.5)
+        try:
+            actual = read_lighting(fd)
+            if actual[:13] == report[:13]:
+                return actual
+        except MouseError as error:
+            if error.code not in ("invalid_lighting_report", "hid_read_denied"):
+                raise
+    raise MouseError("Lighting change could not be confirmed by readback", code="lighting_write_unverified")
+
+def set_lighting_color(fd: int, color: str) -> dict[str, Any]:
+    if len(color) != 7 or color[0] != "#" or any(c not in "0123456789abcdefABCDEF" for c in color[1:]):
+        raise ValueError("LED color must be a six-digit hexadecimal color")
+    with protocol_lock():
+        report = read_lighting(fd)
+        report[6:9] = bytes.fromhex(color[1:])
+        actual = write_lighting(fd, report)
+        return {"color": lighting_color(actual), "verified": True}
+
+
+def set_lighting_power(fd: int, power: str) -> dict[str, Any]:
+    if power not in ("on", "off"):
+        raise ValueError("LED power must be on or off")
+    with protocol_lock():
+        report = read_lighting(fd)
+        # On forces Static. Off only clears the effect nibble, so it can leave an unknown effect.
+        if power == "on" and lighting_power(report) == "unsupported":
+            raise MouseError("The current lighting effect is not supported", code="lighting_effect_unsupported")
+        report[3] = (report[3] & 0x0f) | (0x10 if power == "on" else 0)
+        actual = write_lighting(fd, report)
+        return {"power": lighting_power(actual), "verified": True}
+
+
 def wired_status(fd: int) -> dict[str, Any]:
     with protocol_lock():
         version = read_wired_feature(fd, 0x0b, 8, 0)

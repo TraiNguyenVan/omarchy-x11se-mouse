@@ -45,6 +45,8 @@ The DPI dropdown contains 33 values confirmed by receiver readback during testin
 
 Hover over the mouse illustration to reveal six clickable appearance choices. These change the illustration manually; the plugin does not detect the physical mouse color.
 
+When using the 2.4 GHz receiver, the LED section is a single row: an **Off** circle followed by seven color circles. **Off** clears the effect and leaves the other lighting bytes unchanged, including when the current effect is one this plugin does not otherwise control. Picking a color stores it and, if the LED is off, turns it back on in Static mode. The ring marks the current state: the Off circle while off, otherwise the active color. LED control over USB is refused.
+
 The plugin prefers the wired connection when both are present and switches back to the receiver when the cable is disconnected. The bar’s watcher listens for battery events without periodically polling settings. Some displayed values can be cached; use **Refresh** to request current settings.
 
 ## CLI
@@ -56,6 +58,9 @@ Run the CLI from the plugin directory, `~/.config/omarchy/plugins/trai.x11se-mou
 ./bin/x11se-mouse status --json
 ./bin/x11se-mouse set-dpi 800
 ./bin/x11se-mouse set-polling 500
+./bin/x11se-mouse get-lighting
+./bin/x11se-mouse set-light-color '#00ff00'
+./bin/x11se-mouse set-light-power on
 ./bin/x11se-mouse capabilities
 ```
 

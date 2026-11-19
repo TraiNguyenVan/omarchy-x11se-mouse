@@ -17,6 +17,10 @@ Item {
     property int dpiDraft: -1
     property int pollingDraft: -1
     property int appearance: 0
+    property string ledColor: ""
+    property string ledPower: ""
+    readonly property var ledChoices: ["#ff0000", "#ff8000", "#ffff00", "#00ff00", "#00aaff", "#ff00ff", "#ffffff"]
+    readonly property var ledColorNames: ["Red", "Orange", "Yellow", "Green", "Blue", "Magenta", "White"]
     property bool editingPresets: false
     readonly property var capabilities: hostWidget ? hostWidget.capabilities : null
     readonly property var defaultPresets: capabilities ? capabilities.defaultPresets : []
@@ -107,6 +111,25 @@ Item {
     }
 
     function close() { if (hostWidget) hostWidget.close() }
+    function refreshLighting() {
+        // Keep the last good values: a failed read means the mouse is asleep, not that the LED state is unknown.
+        if (hostWidget && hostWidget.panelOpen && hostWidget.transport === "receiver" && !lightingProcess.running)
+            lightingProcess.running = true
+    }
+    Process {
+        id: lightingProcess
+        command: root.hostWidget ? [root.hostWidget.cliPath, "get-lighting"] : []
+        stdout: StdioCollector { id: lightingOutput; waitForEnd: true }
+        onExited: function(code) {
+            try {
+                var result = JSON.parse(lightingOutput.text)
+                if (code === 0 && result.ok === true && /^#[0-9a-f]{6}$/.test(result.color)) {
+                    root.ledColor = result.color
+                    root.ledPower = ["on", "off", "unsupported"].indexOf(result.power) >= 0 ? result.power : ""
+                }
+            } catch (e) {}
+        }
+    }
     function refreshStatus() {
         if (!hostWidget || statusProcess.running || commandProcess.running) return
         actionError = false
@@ -131,6 +154,10 @@ Item {
         }
         startCommand(name, value)
     }
+    function chooseColor(color) {
+        if (root.ledColor !== color) root.runCommand("set-light-color", color)
+        if (root.ledPower === "off") root.runCommand("set-light-power", "on")
+    }
     function startCommand(name, value) {
         pendingAction = name
         pendingValue = String(value)
@@ -153,6 +180,8 @@ Item {
         }
         actionError = false
         actionMessage = queuedCommands.length ? "Applying latest setting…" : String(result.message || "Setting updated")
+        if (pendingAction === "set-light-color" && /^#[0-9a-f]{6}$/.test(result.color)) ledColor = result.color
+        if (pendingAction === "set-light-power" && ["on", "off"].indexOf(result.power) >= 0) ledPower = result.power
         if (hostWidget && pendingAction === "set-dpi" && Number.isInteger(result.dpi)) {
             if (!hasQueuedCommand("set-dpi")) dpiDraft = result.dpi
             hostWidget.dpi = result.dpi
@@ -425,6 +454,97 @@ Item {
                 }
             }
             Column {
+                visible: !root.editingPresets && root.hostWidget && root.hostWidget.transport === "receiver"
+                width: parent.width; spacing: Style.space(5.7)
+                Row {
+                    width: parent.width
+                    height: Style.space(19.0)
+                    spacing: Style.space(7)
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText; text: "LED"
+                        color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.72)
+                        font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Math.round(Style.font.body * 1.1)
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
+                        text: root.ledPower === "off" ? "Off" : (root.ledColor ? root.ledColorNames[root.ledChoices.indexOf(root.ledColor)] + "  " + root.ledColor : "Current color unavailable")
+                        color: Color.foreground
+                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                        font.pixelSize: Style.font.body
+                        Accessible.name: text
+                    }
+                }
+                Row {
+                    spacing: Style.space(9)
+                    Rectangle {
+                        width: Style.space(26); height: width; radius: width / 2
+                        color: "transparent"
+                        border.width: root.ledPower === "off" ? 3 : 1
+                        border.color: root.ledPower === "off" || activeFocus ? Color.foreground : Color.popups.border
+                        opacity: root.connected && root.ledPower ? 1 : 0.4
+                        activeFocusOnTab: root.connected && root.ledPower !== ""
+                        Accessible.role: Accessible.Button
+                        Accessible.name: "LED off"
+                        Keys.onReturnPressed: if (root.ledPower !== "off") root.runCommand("set-light-power", "off")
+                        Keys.onSpacePressed: if (root.ledPower !== "off") root.runCommand("set-light-power", "off")
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: parent.width - Style.space(9)
+                            height: 1
+                            rotation: -45
+                            color: root.ledPower === "off" || activeFocus ? Color.foreground : Color.popups.border
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: root.connected && root.ledPower !== ""
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: if (root.ledPower !== "off") root.runCommand("set-light-power", "off")
+                        }
+                    }
+                    Repeater {
+                        model: root.ledChoices
+                        delegate: Rectangle {
+                            required property string modelData
+                            width: Style.space(26); height: width; radius: width / 2
+                            color: modelData
+                            border.width: root.ledColor === modelData && root.ledPower !== "off" ? 3 : 1
+                            border.color: (root.ledColor === modelData && root.ledPower !== "off") || activeFocus ? Color.foreground : Color.popups.border
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.margins: Style.space(3)
+                                radius: width / 2
+                                color: "transparent"
+                                border.width: 1
+                                border.color: Color.background
+                                visible: root.ledColor === modelData && root.ledPower !== "off"
+                            }
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✓"
+                                color: modelData === "#ffff00" || modelData === "#ffffff" ? "#202127" : "#ffffff"
+                                font.pixelSize: Style.font.body
+                                font.bold: true
+                                visible: root.ledColor === modelData && root.ledPower !== "off"
+                            }
+                            opacity: root.connected && root.ledColor ? 1 : 0.4
+                            activeFocusOnTab: root.connected && root.ledColor !== ""
+                            Accessible.role: Accessible.Button
+                            Accessible.name: "LED color " + modelData
+                            Keys.onReturnPressed: root.chooseColor(modelData)
+                            Keys.onSpacePressed: root.chooseColor(modelData)
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: root.connected && root.ledColor !== ""
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.chooseColor(modelData)
+                            }
+                        }
+                    }
+                }
+            }
+            Column {
                 visible: !root.editingPresets
                 width: parent.width; spacing: Style.space(5.7)
                 Item {
@@ -565,6 +685,8 @@ Item {
                 root.actionError = true
                 root.actionMessage = statusError.text.trim() || "Status refresh failed"
             }
+            // Read lighting last so its message is the one the user sees.
+            root.refreshLighting()
         }
     }
 
@@ -605,6 +727,8 @@ Item {
 
     Connections {
         target: root.hostWidget
+        function onPanelOpenChanged() { if (root.hostWidget.panelOpen) root.refreshLighting() }
+        function onTransportChanged() { root.refreshLighting() }
         function onDpiChanged() {
             if (!commandProcess.running)
                 root.dpiDraft = root.hostWidget && root.hostWidget.dpi > 0 ? root.hostWidget.dpi : -1

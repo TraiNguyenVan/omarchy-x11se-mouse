@@ -23,6 +23,64 @@ loader.exec_module(cli)
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_lighting_color_write_preserves_shared_settings_and_verifies(self):
+        original = bytearray.fromhex("050f010004a8ff00ff010402af0000")
+        changed = bytearray.fromhex("050f010004a800ff00010401b00000")
+        with patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "read_lighting", side_effect=[original, changed]), \
+             patch.object(mouse, "send_feature") as send, patch.object(mouse.time, "sleep"):
+            result = mouse.set_lighting_color(42, "#00ff00")
+        send.assert_called_once_with(42, changed)
+        self.assertEqual(result, {"color": "#00ff00", "verified": True})
+
+    def test_lighting_rejects_bad_checksum(self):
+        report = bytearray.fromhex("050f010004a8ff00ff010402ae0000")
+        with patch.object(mouse, "read_receiver_feature", return_value=report):
+            with self.assertRaises(mouse.MouseError) as caught:
+                mouse.read_lighting(42)
+        self.assertEqual(caught.exception.code, "invalid_lighting_report")
+
+    def test_lighting_power_preserves_color_and_shared_settings(self):
+        original = bytearray.fromhex("050f010004a8ff00ff010402af0000")
+        changed = bytearray.fromhex("050f011004a8ff00ff010402bf0000")
+        with patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "read_lighting", side_effect=[original, changed]), \
+             patch.object(mouse, "send_feature") as send, patch.object(mouse.time, "sleep"):
+            result = mouse.set_lighting_power(42, "on")
+        send.assert_called_once_with(42, changed)
+        self.assertEqual(result, {"power": "on", "verified": True})
+
+    def test_lighting_off_clears_unverified_effect_and_on_does_not(self):
+        report = bytearray.fromhex("050f012004a8ff00ff010402cf0000")
+        cleared = bytearray.fromhex("050f010004a8ff00ff010402af0000")
+        with patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "read_lighting", side_effect=[bytearray(report), cleared]), \
+             patch.object(mouse, "send_feature") as send, patch.object(mouse.time, "sleep"):
+            result = mouse.set_lighting_power(42, "off")
+        send.assert_called_once_with(42, cleared)
+        self.assertEqual(result, {"power": "off", "verified": True})
+        with patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "read_lighting", return_value=bytearray(report)), \
+             patch.object(mouse, "send_feature") as send, self.assertRaises(mouse.MouseError) as caught:
+            mouse.set_lighting_power(42, "on")
+        self.assertEqual(caught.exception.code, "lighting_effect_unsupported")
+        send.assert_not_called()
+
+    def test_lighting_writes_never_accept_invalid_color(self):
+        with patch.object(mouse, "send_feature") as send:
+            with self.assertRaises(ValueError):
+                mouse.set_lighting_color(42, "#00000z")
+        send.assert_not_called()
+
+    def test_lighting_refuses_unverified_wired_transport(self):
+        output = io.StringIO()
+        with patch.object(mouse, "open_device", return_value=(42, "/dev/hidraw8")), \
+             patch.object(mouse, "is_wired", return_value=True), patch.object(cli.os, "close"), \
+             patch.object(mouse, "set_lighting_color") as change, contextlib.redirect_stdout(output):
+            self.assertNotEqual(cli.main(["set-light-color", "#00ff00"]), 0)
+        change.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["errorCode"], "lighting_unsupported_transport")
+
     def test_cache_save_does_not_follow_preplaced_temp_symlink(self):
         with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             root = Path(directory)
