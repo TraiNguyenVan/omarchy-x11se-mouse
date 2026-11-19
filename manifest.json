@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "trai.x11se-mouse",
   "name": "X11SE Mouse Status",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "trai",
   "license": "MIT",
   "description": "CLI-backed X11SE status, bar panel, and DPI/polling controls",
