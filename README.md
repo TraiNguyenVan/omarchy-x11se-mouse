@@ -4,7 +4,7 @@ An Omarchy bar widget and standalone CLI for the Attack Shark X11SE, connected b
 
 **Requirements:** Omarchy Quattro, Python 3.10 or newer (standard library only), and an X11SE connected by USB or its 2.4 GHz receiver. Other Attack Shark models are not currently supported.
 
-![X11SE mouse settings panel with battery, DPI presets and polling-rate controls](assets/x11se-current-panel.png)
+![X11SE mouse settings panel with battery, DPI presets and polling-rate controls](preview.png)
 
 ## Install
 
