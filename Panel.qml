@@ -287,41 +287,48 @@ Item {
             width: Style.space(152.0); height: footerLine.y
             color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.07)
             HoverHandler { id: visualHover }
-            Image {
-                id: mouseImage
+            Item {
+                id: mouseContainer
+                width: mouseImage.width
+                height: mouseImage.height + Style.space(7.6) + Style.space(12.35)
                 anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: parent.top
-                anchors.topMargin: Style.space(9.5)
-                width: Style.space(114.0); height: Style.space(218)
-                fillMode: Image.PreserveAspectFit
-                source: root.appearances.length ? Qt.resolvedUrl(root.appearances[root.appearance].asset) : ""
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: if (root.appearances.length) root.appearance = (root.appearance + 1) % root.appearances.length
+                anchors.verticalCenter: parent.verticalCenter
+
+                Image {
+                    id: mouseImage
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.top
+                    width: Style.space(114.0); height: Style.space(218)
+                    fillMode: Image.PreserveAspectFit
+                    source: root.appearances.length ? Qt.resolvedUrl(root.appearances[root.appearance].asset) : ""
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: if (root.appearances.length) root.appearance = (root.appearance + 1) % root.appearances.length
+                    }
                 }
-            }
-            Row {
-                visible: visualHover.hovered
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: mouseImage.bottom
-                anchors.topMargin: Style.space(7.6)
-                spacing: Style.space(5.7)
-                Repeater {
-                    model: root.appearances
-                    delegate: Rectangle {
-                        required property int index
-                        required property var modelData
-                        width: Style.space(12.35); height: Style.space(12.35)
-                        color: modelData.color
-                        border.width: root.appearance === index ? 2 : 1
-                        border.color: root.appearance === index ? Color.accent : Color.popups.border
-                        Accessible.role: Accessible.Button
-                        Accessible.name: modelData.name.replace("-", " ") + " mouse illustration"
-                        activeFocusOnTab: true
-                        Keys.onReturnPressed: root.appearance = index
-                        Keys.onSpacePressed: root.appearance = index
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appearance = parent.index }
+                Row {
+                    visible: visualHover.hovered
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: mouseImage.bottom
+                    anchors.topMargin: Style.space(7.6)
+                    spacing: Style.space(5.7)
+                    Repeater {
+                        model: root.appearances
+                        delegate: Rectangle {
+                            required property int index
+                            required property var modelData
+                            width: Style.space(12.35); height: Style.space(12.35)
+                            color: modelData.color
+                            border.width: root.appearance === index ? 2 : 1
+                            border.color: root.appearance === index ? Color.accent : Color.popups.border
+                            Accessible.role: Accessible.Button
+                            Accessible.name: modelData.name.replace("-", " ") + " mouse illustration"
+                            activeFocusOnTab: true
+                            Keys.onReturnPressed: root.appearance = index
+                            Keys.onSpacePressed: root.appearance = index
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appearance = parent.index }
+                        }
                     }
                 }
             }
@@ -651,7 +658,7 @@ Item {
         Rectangle {
             id: footerLine
             anchors.left: parent.left; anchors.right: parent.right
-            y: Math.max(content.implicitHeight + Style.space(12), mouseImage.y + mouseImage.height + Style.space(29)); height: 1; color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.25)
+            y: Math.max(content.implicitHeight + Style.space(12), Style.space(256.5)); height: 1; color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.25)
         }
         Rectangle {
             id: statusDot; x: Style.space(3.8); anchors.verticalCenter: statusText.verticalCenter
