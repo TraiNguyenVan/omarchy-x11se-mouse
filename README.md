@@ -14,13 +14,13 @@ Install the plugin from Omarchy:
 omarchy plugin add https://github.com/TraiNguyenVan/omarchy-x11se-mouse.git --enable
 ```
 
-The receiver and wired mouse expose settings through `hidraw` interface 02 (USB VID:PID `1d57:fa60` and `1d57:2125`, respectively). Install the matching udev rules and grant your account access to the `input` group with one sudo authorization:
+The receiver and wired mouse expose settings through `hidraw` interface 02 (USB VID:PID `1d57:fa60` and `1d57:2125`, respectively). Install the matching udev rules with one sudo authorization:
 
 ```sh
 sudo ~/.config/omarchy/plugins/trai.x11se-mouse/scripts/install-udev-rule.sh
 ```
 
-Reconnect the receiver or cable after setup. If the script adds your account to `input`, log out and back in for the new group membership to take effect. The plugin itself does not use sudo; normal status reads and settings changes run as your user.
+Reconnect the receiver or cable after setup. The udev rule uses `TAG+="uaccess"` to grant read and write access to your active desktop session without modifying system group memberships or requiring a logout. The plugin itself does not use sudo; normal status reads and settings changes run as your user.
 
 ## Remove
 
@@ -28,12 +28,12 @@ Remove the plugin and its device rule:
 
 ```sh
 omarchy plugin remove trai.x11se-mouse
-sudo rm /etc/udev/rules.d/99-x11se-hidraw.rules
+sudo rm -f /etc/udev/rules.d/70-x11se-hidraw.rules /etc/udev/rules.d/99-x11se-hidraw.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=hidraw
 ```
 
-If setup added your account to the `input` group and you no longer need that membership for other devices, remove it with `sudo gpasswd -d "$USER" input`, then log out and back in.
+If an older installation previously added your account to the `input` group and you no longer need that membership for other devices, you can remove it with `sudo gpasswd -d "$USER" input`.
 
 ## Using the panel
 
