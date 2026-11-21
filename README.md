@@ -1,6 +1,6 @@
 # Omarchy X11SE Mouse
 
-An Omarchy bar widget and standalone CLI for the Attack Shark X11SE, connected by USB cable or its 2.4 GHz receiver. Hover over the mouse icon for battery, DPI and polling-rate status; click it to open the settings panel.
+An Omarchy bar widget and standalone CLI for the Attack Shark X11SE, connected by USB cable or its 2.4 GHz receiver. Click the mouse icon to open the settings panel and check battery, DPI and polling rate. Use Refresh in the panel to check again.
 
 **Requirements:** Omarchy Quattro, Python 3.10 or newer (standard library only), and an X11SE connected by USB or its 2.4 GHz receiver. Other Attack Shark models are not currently supported.
 

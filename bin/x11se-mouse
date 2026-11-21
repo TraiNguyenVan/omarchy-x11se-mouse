@@ -69,6 +69,7 @@ def status_once(device: str | None) -> dict:
         with mouse.protocol_lock():
             mouse.drain_events(fd, battery, timeout=0)
         result = mouse.query_status(fd, battery)
+        result["transport"] = "receiver"
         with mouse.protocol_lock():
             mouse.drain_events(fd, battery, timeout=0)
         result.update(battery)

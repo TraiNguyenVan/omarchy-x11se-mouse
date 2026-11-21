@@ -15,7 +15,8 @@ BarWidget {
     property var stages: []
     property string chargeState: ""
     property string transport: ""
-    property string deviceState: "Searching for X11SE mouse"
+    property string deviceState: "unchecked"
+    property bool capabilitiesRequested: false
     property string errorMessage: ""
     property var panelItem: null
     property var capabilities: null
@@ -31,13 +32,14 @@ BarWidget {
     }
 
     readonly property string statusTooltip: {
+        if (deviceState === "unchecked") return "X11SE mouse · Click for settings"
         if (deviceState !== "connected") return errorMessage || "X11SE mouse not detected"
         var batteryText = battery >= 0
             ? battery + "%" + (chargeState ? " (" + chargeState + ")" : "")
-            : "waiting for report"
-        var dpiText = dpi > 0 ? dpi + " DPI" : "waiting for report"
-        var rateText = polling > 0 ? polling + " Hz" : "waiting for report"
-        return "Battery: " + batteryText + "\nDPI: " + dpiText + "\nPolling: " + rateText
+            : "unavailable"
+        var dpiText = dpi > 0 ? dpi + " DPI" : "unavailable"
+        var rateText = polling > 0 ? polling + " Hz" : "unavailable"
+        return "Last checked\nBattery: " + batteryText + "\nDPI: " + dpiText + "\nPolling: " + rateText
     }
 
     function applyCacheWarnings(value) {
@@ -58,22 +60,25 @@ BarWidget {
             activeStage = 0
             stages = []
             chargeState = ""
+            transport = ""
             errorMessage = String(value.error || "Mouse receiver not detected")
             return
         }
         deviceState = "connected"
         if (value.transport && value.transport !== transport) {
-            battery = -1
-            chargeState = ""
+            dpi = -1
+            polling = -1
+            activeStage = 0
+            stages = []
             transport = value.transport
         }
         errorMessage = String(value.error || "")
-        if (Number.isInteger(value.battery) && value.battery >= 0 && value.battery <= 100) battery = value.battery
+        battery = Number.isInteger(value.battery) && value.battery >= 0 && value.battery <= 100 ? value.battery : -1
         if (Number.isInteger(value.dpi) && value.dpi > 0 && (!capabilities || value.dpi <= capabilities.maxReportedDpi)) dpi = value.dpi
         if (Number.isInteger(value.polling) && (!capabilities || capabilities.pollingRates.indexOf(value.polling) >= 0)) polling = value.polling
         if (Number.isInteger(value.stage) && value.stage >= 1 && (!capabilities || value.stage <= capabilities.stageCount)) activeStage = value.stage
         if (Array.isArray(value.stages) && (!capabilities || value.stages.length === capabilities.stageCount)) stages = value.stages
-        if (["charging", "charged", "normal"].indexOf(value.chargeState) >= 0) chargeState = value.chargeState
+        chargeState = ["charging", "charged", "normal"].indexOf(value.chargeState) >= 0 ? value.chargeState : ""
     }
 
     function injectPanel() {
@@ -85,9 +90,16 @@ BarWidget {
         if ("hostWidget" in target) target.hostWidget = root
     }
 
-    function open() { panelOpen = true }
+    function open() {
+        if (panelOpen) return
+        if (!capabilitiesRequested) {
+            capabilitiesRequested = true
+            capabilityProcess.running = true
+        }
+        panelOpen = true
+    }
     function close() { panelOpen = false }
-    function togglePanel() { panelOpen = !panelOpen }
+    function togglePanel() { if (panelOpen) close(); else open() }
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
@@ -108,7 +120,7 @@ BarWidget {
         function open(): void { root.open() }
         function close(): void { root.close() }
         function toggle(): void { root.togglePanel() }
-        function refresh(): void { if (!statusProcess.running) statusProcess.running = true }
+        function refresh(): void { if (root.panelItem) root.panelItem.refreshStatus() }
     }
 
     BarIconButton {
@@ -124,7 +136,6 @@ BarWidget {
 
     Process {
         id: capabilityProcess
-        running: true
         command: [root.cliPath, "capabilities"]
         stdout: StdioCollector { id: capabilityOutput; waitForEnd: true }
         onExited: function(code) {
@@ -132,23 +143,5 @@ BarWidget {
             try { root.capabilities = JSON.parse(capabilityOutput.text) }
             catch (e) { console.warn("X11SE: invalid model capabilities", e) }
         }
-    }
-
-    Process {
-        id: statusProcess
-        running: true
-        command: [root.cliPath, "watch"]
-        stdout: SplitParser {
-            onRead: function(line) {
-                try { root.applyStatus(JSON.parse(String(line))) } catch (e) {}
-            }
-        }
-        onExited: restartProcess.restart()
-    }
-
-    Timer {
-        id: restartProcess
-        interval: 30000
-        onTriggered: if (!statusProcess.running) statusProcess.running = true
     }
 }

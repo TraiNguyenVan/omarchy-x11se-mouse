@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -9,6 +10,9 @@ Item {
     property var bar: null
     property var anchorItem: null
     property var hostWidget: null
+    property bool presetsRequested: false
+
+    onHostWidgetChanged: if (hostWidget && hostWidget.panelOpen) refreshOnOpen()
     property string actionMessage: ""
     property string pendingAction: ""
     property string pendingValue: ""
@@ -73,7 +77,6 @@ Item {
     Process {
         id: presetLoadProcess
         command: root.hostWidget ? [root.hostWidget.cliPath, "get-presets"] : []
-        running: root.hostWidget !== null
         stdout: StdioCollector { id: presetLoadOutput; waitForEnd: true }
         onExited: function(code) {
             try {
@@ -130,6 +133,14 @@ Item {
             } catch (e) {}
         }
     }
+    function refreshOnOpen() {
+        if (!presetsRequested) {
+            presetsRequested = true
+            presetLoadProcess.running = true
+        }
+        refreshStatus()
+    }
+
     function refreshStatus() {
         if (!hostWidget || statusProcess.running || commandProcess.running) return
         actionError = false
@@ -196,12 +207,14 @@ Item {
     function handleRefreshResult(output) {
         try {
             var value = JSON.parse(String(output || "").trim())
-            if (value.connected === true && hostWidget) {
-                hostWidget.applyStatus(value)
+            if (!value || typeof value.connected !== "boolean") throw new Error("Invalid status")
+            if (hostWidget) hostWidget.applyStatus(value)
+            if (value.connected && hostWidget) {
                 if (Number.isInteger(value.dpi) && !commandProcess.running) dpiDraft = value.dpi
                 if (Number.isInteger(value.polling) && !commandProcess.running) pollingDraft = value.polling
                 actionError = false
                 actionMessage = "Status refreshed"
+                refreshLighting()
             } else {
                 actionError = true
                 actionMessage = String(value.error || "Mouse status unavailable")
@@ -660,15 +673,73 @@ Item {
             anchors.left: parent.left; anchors.right: parent.right
             y: Math.max(content.implicitHeight + Style.space(12), Style.space(256.5)); height: 1; color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.25)
         }
-        Rectangle {
-            id: statusDot; x: Style.space(3.8); anchors.verticalCenter: statusText.verticalCenter
-            width: Style.space(5.7); height: Style.space(5.7)
-            color: root.actionError || (root.hostWidget && root.hostWidget.deviceState === "disconnected") ? Color.urgent
-                : (root.presetSaving || commandProcess.running || statusProcess.running || root.lowBattery || (root.hostWidget && root.hostWidget.cacheUnavailable) ? "#e5b567" : Color.accent)
+        Item {
+            id: statusIndicator
+            x: Style.space(3.8)
+            anchors.verticalCenter: statusText.verticalCenter
+            width: Style.space(12)
+            height: width
+
+            readonly property bool busy: root.presetSaving || commandProcess.running || statusProcess.running
+            property bool showSpinner: false
+            readonly property color amber: "#e5b567"
+
+            onBusyChanged: {
+                if (!busy) showSpinner = false
+            }
+
+            Timer {
+                interval: 120
+                running: statusIndicator.busy
+                onTriggered: statusIndicator.showSpinner = true
+            }
+
+            Rectangle {
+                anchors.centerIn: parent
+                width: Style.space(5.7)
+                height: width
+                color: root.actionError || (root.hostWidget && root.hostWidget.deviceState === "disconnected") ? Color.urgent
+                    : (statusIndicator.busy || root.lowBattery || (root.hostWidget && root.hostWidget.cacheUnavailable) ? statusIndicator.amber : Color.accent)
+                opacity: statusIndicator.showSpinner ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: 100 } }
+            }
+
+            Shape {
+                id: spinner
+                anchors.fill: parent
+                preferredRendererType: Shape.CurveRenderer
+                opacity: statusIndicator.showSpinner ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: 100 } }
+
+                ShapePath {
+                    strokeWidth: Style.space(1.5)
+                    strokeColor: statusIndicator.amber
+                    fillColor: "transparent"
+                    capStyle: ShapePath.RoundCap
+
+                    PathAngleArc {
+                        centerX: spinner.width / 2
+                        centerY: spinner.height / 2
+                        radiusX: spinner.width * 0.4
+                        radiusY: radiusX
+                        startAngle: -90
+                        sweepAngle: 260
+                    }
+                }
+
+                RotationAnimator on rotation {
+                    running: statusIndicator.showSpinner || spinner.visible
+                    from: 0
+                    to: 360
+                    duration: 900
+                    loops: Animation.Infinite
+                }
+            }
         }
         Text {
             id: statusText
-            anchors.left: statusDot.right; anchors.right: parent.right
+            anchors.left: statusIndicator.right; anchors.right: parent.right
             anchors.leftMargin: Style.space(8.55); y: (footerLine.y + parent.height + popup.padding - height) / 2; height: Style.space(25.65)
             textFormat: Text.PlainText; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter
             text: (root.hostWidget && root.hostWidget.cacheUnavailable && !root.actionError && !root.presetSaving && !commandProcess.running && !statusProcess.running)
@@ -692,8 +763,6 @@ Item {
                 root.actionError = true
                 root.actionMessage = statusError.text.trim() || "Status refresh failed"
             }
-            // Read lighting last so its message is the one the user sees.
-            root.refreshLighting()
         }
     }
 
@@ -734,8 +803,7 @@ Item {
 
     Connections {
         target: root.hostWidget
-        function onPanelOpenChanged() { if (root.hostWidget.panelOpen) root.refreshLighting() }
-        function onTransportChanged() { root.refreshLighting() }
+        function onPanelOpenChanged() { if (root.hostWidget.panelOpen) root.refreshOnOpen() }
         function onDpiChanged() {
             if (!commandProcess.running)
                 root.dpiDraft = root.hostWidget && root.hostWidget.dpi > 0 ? root.hostWidget.dpi : -1
