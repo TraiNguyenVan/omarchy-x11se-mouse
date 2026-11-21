@@ -1,11 +1,62 @@
-# Adding another mouse
+# Developer Guide & Adding New Models
 
-The X11SE 2.4 GHz receiver and wired USB connection are supported. `model_catalog.py` describes their USB identities and UI choices; `hid_discovery.py` matches registered identities, and `x11se_mouse.py` implements their protocols. The CLI exposes the descriptor with `capabilities` and keeps the existing status and tuning interface.
+Technical reference for the driver architecture, protocol implementation, and instructions for adding support for additional mouse models.
 
-The directly connected X11SE has USB `1d57:2125`, with a settings interface at 02. Its HID report descriptor differs from the receiver's: feature report 04 has 51 payload bytes rather than 55, and reports 05 and 0c also have different lengths. `./bin/x11se-mouse devices` detects both interfaces without sending HID commands. Wired version, polling, DPI, and battery events have been verified on hardware. Polling and DPI writes were verified by readback and restored to their original values. The udev rule grants access to interface 02 for both transports.
+## Architecture
 
-Investigation: the [manufacturer's product page](https://attackshark.com/products/attack-shark-x11se-wireless-gaming-mouse) links a Windows installer and a web configurator. The X11SE Windows program (`AttackShark.exe`, SHA-256 `e0d78c3aae2883fb3bd0e3e464d020a1f5d036b5ae9126f7c631bdefd3879daa`) contains the read handshake at `0x424f10` and its model-specific callers at `0x424810`: version `0b/08` profile 0, polling `06/09` profile 1, and DPI `04/38` profile 1. The DPI write call uses 56 bytes at `0x4231ab`; bounded retries handle observed USB stalls. [LinShark](https://github.com/JSjuan/LinShark) documents related wired transactions for the X8 Pro but has not measured the X11SE.
+- **`model_catalog.py`**: Model descriptors, supported VID:PID pairs, UI appearance choices, and default capabilities.
+- **`hid_discovery.py`**: Device discovery matching registered HID identities and settings interfaces without sending active commands.
+- **`x11se_mouse.py`**: Core protocol implementation, handling packet framing, handshakes, reads/writes, readback validation, and state caching.
+- **`bin/x11se-mouse`**: CLI frontend exposing status, controls, and diagnostics (`devices`, `capabilities`, `watch`).
 
-Before adding a model, identify its USB vendor, product and settings interface and verify its HID reports, permissions, battery events, DPI values and polling rates on that hardware. Do not assume a similar name means a compatible protocol. Add a separate protocol implementation where necessary, register its exact identity, route discovery and CLI operations to it, and supply only verified capabilities and suitable assets. Model selection, separate per-device state, permissions and multi-device behavior need explicit design and testing when a second model is added; the current CLI selects only X11SE.
+## Hardware Reference (X11SE)
 
-Preserve serialized transactions, readback verification, actionable errors, and existing user settings. Add protocol and discovery tests with recorded or mocked data, then verify reads and carefully test writes on the actual receiver. `python -m unittest discover -s tests -v` runs the device-free tests.
+| Connection | VID:PID | Settings Interface | Feature Report 04 Payload |
+|---|---|---|---|
+| **2.4 GHz Receiver** | `1d57:fa60` | Interface 02 | 55 bytes |
+| **Wired USB** | `1d57:2125` | Interface 02 | 51 bytes |
+
+- Access to interface 02 for both transports is granted via `udev/70-x11se-hidraw.rules`.
+- Reports `05` and `0c` also differ in length between wired and wireless transports.
+- Check device detection without sending commands using `./bin/x11se-mouse devices`.
+
+## Reverse Engineering Notes
+
+Reference implementation details were extracted from official vendor software:
+
+- **Source**: [Attack Shark X11SE Product Page](https://attackshark.com/products/attack-shark-x11se-wireless-gaming-mouse)
+- **Binary**: `AttackShark.exe` (SHA-256 `e0d78c3aae2883fb3bd0e3e464d020a1f5d036b5ae9126f7c631bdefd3879daa`)
+- **Key Disassembly Offsets**:
+  - Read handshake: `0x424f10`
+  - Model-specific callers: `0x424810`
+    - Version: `0b/08` (profile 0)
+    - Polling rate: `06/09` (profile 1)
+    - DPI: `04/38` (profile 1)
+  - DPI write call: 56 bytes at `0x4231ab` (includes bounded retries for USB stalls)
+- **Prior Art**: [LinShark](https://github.com/JSjuan/LinShark) documents related wired transactions for the X8 Pro.
+
+## Adding Another Mouse Model
+
+When adding support for a new model:
+
+1. **Identify Hardware**:
+   - Determine USB vendor/product IDs and the dedicated settings interface.
+   - Inspect HID report descriptors across both wired and wireless receiver connections.
+   - Never assume similar model names share the same protocol or packet layout.
+
+2. **Verify on Hardware**:
+   - Verify battery event reports, supported polling rates, and valid DPI steps on physical hardware.
+   - Test read and write transactions safely, ensuring settings can be read back and restored.
+
+3. **Code Changes**:
+   - Register the identity in `model_catalog.py` with its verified capabilities and asset mappings.
+   - Route discovery in `hid_discovery.py` to the appropriate model handler.
+   - Implement or adapt protocol logic in `x11se_mouse.py` (or a dedicated protocol module).
+   - Ensure transactions remain serialized and verified via readback.
+
+4. **Testing**:
+   - Add unit tests with recorded or mocked packets under `tests/`.
+   - Run the test suite:
+     ```sh
+     python -m unittest discover -s tests -v
+     ```
