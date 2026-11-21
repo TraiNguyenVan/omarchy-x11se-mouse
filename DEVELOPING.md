@@ -1,13 +1,6 @@
 # Developer Guide & Adding New Models
 
-Technical reference for the driver architecture, protocol implementation, and instructions for adding support for additional mouse models.
-
-## Architecture
-
-- **`model_catalog.py`**: Model descriptors, supported VID:PID pairs, UI appearance choices, and default capabilities.
-- **`hid_discovery.py`**: Device discovery matching registered HID identities and settings interfaces without sending active commands.
-- **`x11se_mouse.py`**: Core protocol implementation, handling packet framing, handshakes, reads/writes, readback validation, and state caching.
-- **`bin/x11se-mouse`**: CLI frontend exposing status, controls, and diagnostics (`devices`, `capabilities`, `watch`).
+Technical reference for the X11SE hardware and protocol, with instructions for adding support for other mouse models.
 
 ## Hardware Reference (X11SE)
 

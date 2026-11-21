@@ -6,17 +6,6 @@ Guidance, architectural invariants, and safety rules for AI coding agents workin
 
 An Omarchy bar widget and standalone CLI driver for the Attack Shark X11SE mouse, communicating via raw HID over 2.4 GHz wireless receiver or USB wired cable.
 
-### Architecture & File Roles
-
-- **`model_catalog.py`**: Model descriptors, registered USB VID:PID identities, UI color assets, and capability bounds.
-- **`hid_discovery.py`**: Non-invasive device detection matching registered VID:PID and settings interface (interface 02).
-- **`x11se_mouse.py`**: Core driver protocol implementation (framing, handshakes, status decoding, setting writes, and locking).
-- **`bin/x11se-mouse`**: Standalone CLI entrypoint (`status`, `watch`, `set-dpi`, `set-polling`, `devices`, `capabilities`, `probe-wired`, `wired-status`, `get-lighting`, `set-light-color`, `set-light-power`, `get-presets`, `save-presets`).
-- **`BarWidget.qml` & `Panel.qml`**: Omarchy desktop bar widget, popup tuning panel, and IPC handler (`trai.x11se-mouse`).
-- **`BoundedDropdown.qml`**: Screen-edge bounded dropdown popup component for QML UI.
-- **`udev/70-x11se-hidraw.rules` & `scripts/install-udev-rule.sh`**: Udev rules granting active desktop session `uaccess` to interface 02.
-- **`tests/test_protocol.py`**: 100% device-free unit tests utilizing mocked HID ioctls and report fixtures.
-
 ---
 
 ## Strict Hardware Safety Guardrails
