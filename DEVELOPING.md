@@ -8,10 +8,21 @@ Technical reference for the X11SE hardware and protocol, with instructions for a
 |---|---|---|---|
 | **2.4 GHz Receiver** | `1d57:fa60` | Interface 02 | 55 bytes |
 | **Wired USB** | `1d57:2125` | Interface 02 | 51 bytes |
+| **Bluetooth** | `045e:0007` (generic SDP) | none | not available |
 
-- Access to interface 02 for both transports is granted via `udev/70-x11se-hidraw.rules`.
+- Access to interface 02 for the USB transports is granted via `udev/70-x11se-hidraw.rules`.
 - Reports `05` and `0c` also differ in length between wired and wireless transports.
 - Check device detection without sending commands using `./bin/x11se-mouse devices`.
+- Bluetooth is matched by HID bus `0005` plus the advertised name prefix `X11SE` (observed `X11SEmouse2`), because the SDP vendor/product is the generic Microsoft `045E:0007`. Its HID report descriptor declares only input/output reports, so every vendor feature request fails with `EIO`.
+- Bluetooth battery is read from the BlueZ GATT Battery Service (`bluetoothctl info <address>`). No HID node is opened, so no udev rule is required.
+- Open source Linux implementation reference: [OpenSharkX11](https://github.com/clevim/OpenSharkX11).
+- Proprietary Bluetooth settings operate over BlueZ GATT vendor service `FEE0`:
+  - `FEE3` (`0000fee3-0000-1000-8000-00805f9b34fb`): command write channel (requires confirmed write `type='request'`).
+  - `FEE4` (`0000fee4-0000-1000-8000-00805f9b34fb`): response/notification channel.
+  - DPI: 56-byte Report `0x04` payload written to `FEE3`; mouse emits ACK `07 50 00 04` on `FEE4`.
+  - Lighting: 15-byte Report `0x05` payload written to `FEE3`; mouse emits ACK `07 50 00 05` on `FEE4`.
+  - Polling rate: BLE connection interval is hardware-fixed (~125 Hz max); polling rate writes are rejected.
+- Transport precedence is wired → Bluetooth → receiver: the receiver dongle remains enumerated while the mouse is linked over Bluetooth, but denies feature reads in that state.
 
 ## Reverse Engineering Notes
 

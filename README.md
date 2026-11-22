@@ -1,8 +1,8 @@
 # Omarchy X11SE Mouse
 
-An Omarchy bar widget and standalone CLI for the Attack Shark X11SE, connected by USB cable or its 2.4 GHz receiver. Click the mouse icon to open the settings panel and check battery, DPI and polling rate. Use Refresh in the panel to check again.
+An Omarchy bar widget and standalone CLI for the Attack Shark X11SE, connected by USB cable, its 2.4 GHz receiver, or Bluetooth. Click the mouse icon to open the settings panel and control battery, DPI, polling rate, and lighting.
 
-**Requirements:** Omarchy Quattro, Python 3.10 or newer (standard library only), and an X11SE connected by USB or its 2.4 GHz receiver. Other Attack Shark models are not currently supported.
+**Requirements:** Omarchy Quattro, Python 3.10 or newer (standard library only), and an Attack Shark X11SE mouse. Other models are not currently supported. On Bluetooth, BlueZ handles battery and BLE GATT handles DPI and lighting; polling rate is hardware-fixed (~125 Hz).
 
 ![X11SE mouse settings panel with battery, DPI presets and polling-rate controls](preview.png)
 
@@ -37,6 +37,8 @@ A standalone CLI is available in `./bin/x11se-mouse`:
 ./bin/x11se-mouse status
 ./bin/x11se-mouse set-dpi 800
 ./bin/x11se-mouse set-polling 500
+./bin/x11se-mouse set-lighting-color ff0000
+./bin/x11se-mouse set-lighting-power off
 ./bin/x11se-mouse --help
 ```
 

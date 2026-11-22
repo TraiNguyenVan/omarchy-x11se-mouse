@@ -7,13 +7,15 @@ import errno
 import fcntl
 import json
 import os
+import re
 import select
 import struct
+import subprocess
 import time
 from typing import Any
 
 import hid_discovery
-from model_catalog import X11SE, X11SE_WIRED
+from model_catalog import X11SE, X11SE_BLUETOOTH, X11SE_WIRED
 
 VENDOR_ID = X11SE["usb"]["vendor"]
 PRODUCT_ID = X11SE["usb"]["product"]
@@ -27,6 +29,9 @@ COMMON_DPI_PRESETS = tuple(X11SE["defaultPresets"])
 WRITES_ENABLED = True
 CACHE_WARNINGS: list[dict[str, str]] = []
 DISCOVERY_ERRORS: list[dict[str, str]] = []
+BLUETOOTH_BATTERY_POLL_SECONDS = 30.0
+BLUETOOTH_BATTERY_PATTERN = re.compile(
+    r"^\s*Battery Percentage:\s+0x[0-9a-fA-F]+\s+\((\d{1,3})\)\s*$", re.MULTILINE)
 
 # PixArt PAW3311 encoding table used by the X11/X11SE receiver protocol.
 DPI_TABLE = [
@@ -77,10 +82,21 @@ def ioctl_number(direction: int, number: int, size: int) -> int:
 
 
 def find_hidraw() -> str | None:
+    # A wired cable and an active Bluetooth HID node both prove the mouse is
+    # linked. The receiver dongle stays enumerated even when the mouse is in
+    # Bluetooth mode, so it is only used when neither active link exists.
+    DISCOVERY_ERRORS.clear()
     wired = hid_discovery.find_hidraw((X11SE_WIRED,), [])
     if wired:
         return wired[1]
-    match = hid_discovery.find_hidraw((X11SE,), DISCOVERY_ERRORS)
+    bluetooth_errors: list[dict[str, str]] = []
+    bluetooth = hid_discovery.find_hidraw((X11SE_BLUETOOTH,), bluetooth_errors)
+    if bluetooth:
+        return bluetooth[1]
+    DISCOVERY_ERRORS.extend(bluetooth_errors)
+    receiver_errors: list[dict[str, str]] = []
+    match = hid_discovery.find_hidraw((X11SE,), receiver_errors)
+    DISCOVERY_ERRORS.extend(receiver_errors)
     return match[1] if match else None
 
 
@@ -89,11 +105,18 @@ def is_wired(path: str) -> bool:
     return bool(wired and os.path.realpath(path) == os.path.realpath(wired[1]))
 
 
+def is_bluetooth(path: str) -> bool:
+    identity = hid_discovery.hid_identity(path)
+    return bool(identity and identity["bus"] == hid_discovery.BLUETOOTH_BUS
+                and identity["name"].lower().startswith(X11SE_BLUETOOTH["bluetooth"]["name"].lower()))
+
+
 def open_device(device: str | None = None) -> tuple[int, str]:
     path = device or find_hidraw()
     if not path:
-        raise MouseError("X11SE 2.4 GHz receiver was not found", code="receiver_not_found",
-                         operation="open_device", details={"discovery_errors": DISCOVERY_ERRORS[:]})
+        raise MouseError("X11SE mouse was not found over USB, its 2.4 GHz receiver, or Bluetooth",
+                         code="mouse_not_found", operation="open_device",
+                         details={"discovery_errors": DISCOVERY_ERRORS[:]})
     try:
         return os.open(path, os.O_RDWR | os.O_NONBLOCK), path
     except PermissionError as error:
@@ -103,6 +126,260 @@ def open_device(device: str | None = None) -> tuple[int, str]:
     except OSError as error:
         raise MouseError(f"Could not open {path}: {error.strerror}", code="device_open_failed",
                          operation="open_device", details={"device": path, "errno": error.errno}) from error
+
+
+def parse_bluetooth_battery(output: str) -> int | None:
+    match = BLUETOOTH_BATTERY_PATTERN.search(output or "")
+    if not match:
+        return None
+    value = int(match.group(1))
+    return value if 0 <= value <= 100 else None
+
+
+def bluetooth_battery(address: str | None) -> int | None:
+    """Read the GATT Battery Service level through BlueZ; never touches HID."""
+    if not address:
+        return None
+    try:
+        completed = subprocess.run(
+            ["bluetoothctl", "info", address],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=3, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_bluetooth_battery(completed.stdout)
+
+
+def bluetooth_status(device: str) -> dict[str, Any]:
+    address = hid_discovery.bluetooth_address(device)
+    return {
+        "connected": True,
+        "transport": "bluetooth",
+        "battery": bluetooth_battery(address),
+        "chargeState": None,
+        "dpi": None,
+        "stage": None,
+        "stages": None,
+        "polling": None,
+        "settingsAvailable": True,
+        "error": None,
+    }
+
+
+def bluetooth_polling_unsupported_error() -> MouseError:
+    return MouseError(
+        "Polling rate cannot be configured over Bluetooth (hardware fixed to 125 Hz); "
+        "connect the 2.4 GHz receiver or the USB cable",
+        code="bluetooth_polling_unsupported", operation="bluetooth_settings")
+
+
+def bluetooth_settings_error() -> MouseError:
+    return bluetooth_polling_unsupported_error()
+
+
+def bluetooth_gatt_paths(address: str) -> tuple[str, str] | None:
+    dev_str = "dev_" + address.upper().replace(":", "_")
+    try:
+        proc = subprocess.run(["busctl", "tree", "org.bluez"], capture_output=True, text=True, check=False)
+        tree = proc.stdout
+    except OSError:
+        return None
+    char_paths = [
+        line.strip().split()[-1]
+        for line in tree.splitlines()
+        if dev_str in line and "/char" in line and "/desc" not in line
+    ]
+    fee3 = None
+    fee4 = None
+    for cp in char_paths:
+        try:
+            res = subprocess.run(
+                ["busctl", "get-property", "org.bluez", cp, "org.bluez.GattCharacteristic1", "UUID"],
+                capture_output=True, text=True, check=False
+            )
+            val = res.stdout.lower()
+            if "fee3" in val:
+                fee3 = cp
+            elif "fee4" in val:
+                fee4 = cp
+        except OSError:
+            continue
+    if fee3 and fee4:
+        return fee3, fee4
+    return None
+
+
+def bluetooth_gatt_write_and_verify(address: str, payload: bytes | bytearray, expected_report_id: int, timeout: float = 3.0) -> bool:
+    paths = bluetooth_gatt_paths(address)
+    if not paths:
+        raise MouseError("Bluetooth GATT service FEE0 characteristics not found", code="bluetooth_gatt_unavailable")
+    fee3_path, fee4_path = paths
+
+    try:
+        mon = subprocess.Popen([
+            "dbus-monitor", "--system",
+            f"type='signal',interface='org.freedesktop.DBus.Properties',path='{fee4_path}'"
+        ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    except OSError as error:
+        raise MouseError(f"Failed to start dbus-monitor: {error}", code="bluetooth_monitor_failed") from error
+
+    try:
+        time.sleep(0.15)
+        try:
+            ctl = subprocess.Popen(["bluetoothctl"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        except OSError as error:
+            raise MouseError(f"Failed to start bluetoothctl: {error}", code="bluetoothctl_failed") from error
+
+        hex_bytes = " ".join(f"0x{b:02x}" for b in payload)
+        script = (
+            "menu gatt\n"
+            f"select-attribute {fee4_path}\n"
+            "notify on\n"
+            f"select-attribute {fee3_path}\n"
+            f'write "{hex_bytes}" 0 request\n'
+        )
+        ctl.stdin.write(script)
+        ctl.stdin.flush()
+
+        start = time.time()
+        buf = ""
+        ack_seen = False
+
+        fl = fcntl.fcntl(mon.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(mon.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+        expected_ack_pat = re.compile(rf"(?:07|55)\s+50\s+00\s+{expected_report_id:02x}")
+
+        while time.time() - start < timeout:
+            try:
+                chunk = mon.stdout.read()
+                if chunk:
+                    buf += chunk
+                    if expected_ack_pat.search(buf):
+                        ack_seen = True
+                        break
+            except (BlockingIOError, IOError):
+                pass
+            time.sleep(0.05)
+
+        try:
+            ctl.stdin.write("notify off\nexit\n")
+            ctl.stdin.flush()
+            ctl.communicate(timeout=0.5)
+        except Exception:
+            ctl.kill()
+
+        if not ack_seen:
+            raise MouseError(f"Bluetooth setting write for report 0x{expected_report_id:02x} could not be confirmed by readback ACK",
+                             code="bluetooth_write_unverified", operation="bluetooth_gatt_write",
+                             details={"report_id": f"0x{expected_report_id:02x}"})
+        return True
+    finally:
+        mon.terminate()
+        try:
+            mon.communicate(timeout=0.5)
+        except Exception:
+            mon.kill()
+
+
+def bluetooth_build_dpi_report(value: int, cached: dict | None = None) -> tuple[bytearray, int, list[int]]:
+    stages = list((cached and cached.get("stages")) or [400, 800, 1600, 2400, 3200, 5000])
+    while len(stages) < 6:
+        stages.append(1000)
+    stages = stages[:6]
+
+    stage = (cached and cached.get("stage")) or 2
+    if not (1 <= stage <= 6):
+        stage = 2
+    stages[stage - 1] = value
+
+    buf = bytearray(56)
+    buf[0] = 0x04
+    buf[1] = 0x38
+    buf[2] = 0x01
+    buf[5] = 0x3f
+    for i, d in enumerate(stages):
+        xb, yb, dbl, trp = encode_dpi(d)
+        buf[8 + i] = xb
+        buf[16 + i] = yb
+        if dbl:
+            buf[6] |= (1 << i)
+        if trp:
+            buf[7] |= (1 << i)
+    buf[24] = stage
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
+    for i, (r, g, b) in enumerate(colors):
+        buf[25 + i * 3] = r
+        buf[26 + i * 3] = g
+        buf[27 + i * 3] = b
+    buf[49] = 0x00
+    struct.pack_into(">H", buf, 50, sum(buf[3:50]))
+    return buf, stage, stages
+
+
+def bluetooth_set_dpi(device: str, value: int, cached: dict | None = None) -> dict[str, Any]:
+    address = hid_discovery.bluetooth_address(device)
+    if not address:
+        raise MouseError("Bluetooth address could not be resolved", code="bluetooth_address_missing")
+    report, stage, stages = bluetooth_build_dpi_report(value, cached)
+    with protocol_lock():
+        bluetooth_gatt_write_and_verify(address, report, DPI_REPORT)
+    return {
+        "dpi": value,
+        "stage": stage,
+        "stages": stages,
+        "verified": True,
+        "acknowledged": True,
+    }
+
+
+def bluetooth_build_lighting_report(color: str | None = None, power: str | None = None, cached: dict | None = None) -> bytearray:
+    buf = bytearray(15)
+    buf[0] = 0x05
+    buf[1] = 0x0f
+    buf[2] = 0x01
+    current_power = power or (cached and cached.get("lightPower")) or "on"
+    buf[3] = 0x10 if current_power == "on" else 0x00
+    buf[4] = 0x03
+    buf[5] = 0xa8
+    hex_col = color or (cached and cached.get("lightColor")) or "#00ff00"
+    if hex_col.startswith("#"):
+        hex_col = hex_col[1:]
+    rgb = bytes.fromhex(hex_col)
+    buf[6:9] = rgb
+    buf[9] = 0x01
+    buf[10] = 0x04
+    buf[11:13] = sum(buf[3:11]).to_bytes(2, "big")
+    return buf
+
+
+def bluetooth_set_lighting_color(device: str, color: str, cached: dict | None = None) -> dict[str, Any]:
+    if len(color) != 7 or color[0] != "#" or any(c not in "0123456789abcdefABCDEF" for c in color[1:]):
+        raise ValueError("LED color must be a six-digit hexadecimal color")
+    address = hid_discovery.bluetooth_address(device)
+    if not address:
+        raise MouseError("Bluetooth address could not be resolved", code="bluetooth_address_missing")
+    report = bluetooth_build_lighting_report(color=color, cached=cached)
+    with protocol_lock():
+        bluetooth_gatt_write_and_verify(address, report, 0x05)
+    return {"color": color.lower(), "verified": True}
+
+
+def bluetooth_set_lighting_power(device: str, power: str, cached: dict | None = None) -> dict[str, Any]:
+    if power not in ("on", "off"):
+        raise ValueError("LED power must be on or off")
+    address = hid_discovery.bluetooth_address(device)
+    if not address:
+        raise MouseError("Bluetooth address could not be resolved", code="bluetooth_address_missing")
+    report = bluetooth_build_lighting_report(power=power, cached=cached)
+    with protocol_lock():
+        bluetooth_gatt_write_and_verify(address, report, 0x05)
+    return {"power": power, "verified": True}
+
+
+def bluetooth_set_polling(device: str, rate: int) -> dict[str, Any]:
+    raise bluetooth_polling_unsupported_error()
 
 
 def send_feature(fd: int, report: bytes | bytearray) -> None:
@@ -626,6 +903,8 @@ def status_text(status: dict[str, Any]) -> str:
     dpi = "--" if status.get("dpi") is None else f"{status['dpi']} DPI (stage {status['stage']})"
     polling = "--" if status.get("polling") is None else f"{status['polling']} Hz"
     lines = [f"Battery: {battery}", f"DPI: {dpi}", f"Polling: {polling}"]
+    if status.get("transport") == "bluetooth":
+        lines.append("Transport: Bluetooth")
     for warning in status.get("warnings", []):
         lines.append("Warning: " + json.dumps(warning, separators=(",", ":")))
     return "\n".join(lines)

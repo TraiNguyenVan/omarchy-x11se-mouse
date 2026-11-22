@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import x11se_mouse as mouse
 import hid_discovery
-from model_catalog import X11SE, X11SE_WIRED
+from model_catalog import X11SE, X11SE_BLUETOOTH, X11SE_WIRED
 
 loader = importlib.machinery.SourceFileLoader("x11se_cli", str(Path(__file__).resolve().parents[1] / "bin/x11se-mouse"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -74,7 +74,9 @@ class ProtocolTests(unittest.TestCase):
 
     def test_lighting_refuses_unverified_wired_transport(self):
         output = io.StringIO()
-        with patch.object(mouse, "open_device", return_value=(42, "/dev/hidraw8")), \
+        with patch.object(mouse, "find_hidraw", return_value="/dev/hidraw8"), \
+             patch.object(mouse, "is_bluetooth", return_value=False), \
+             patch.object(mouse, "open_device", return_value=(42, "/dev/hidraw8")), \
              patch.object(mouse, "is_wired", return_value=True), patch.object(cli.os, "close"), \
              patch.object(mouse, "set_lighting_color") as change, contextlib.redirect_stdout(output):
             self.assertNotEqual(cli.main(["set-light-color", "#00ff00"]), 0)
@@ -192,6 +194,8 @@ class ProtocolTests(unittest.TestCase):
             root.chmod(0o777)
             device_fd = os.open(os.devnull, os.O_RDONLY)
             with patch.object(cli, "cache_path", return_value=root / "private" / "status.json"), \
+                 patch.object(mouse, "find_hidraw", return_value="/dev/hidraw2"), \
+                 patch.object(mouse, "is_bluetooth", return_value=False), \
                  patch.object(mouse, "open_device", return_value=(device_fd, "mock")), \
                  patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
                  patch.object(mouse, "drain_events"), \
@@ -368,6 +372,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["devices"], [
             {"transport": "receiver", "device": "/dev/hidraw2", "supported": True},
             {"transport": "wired", "device": "/dev/hidraw8", "supported": True},
+            {"transport": "bluetooth", "device": "/dev/hidraw8", "supported": True},
         ])
 
     def test_wired_version_probe_uses_vendor_read_sequence(self):
@@ -462,6 +467,146 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(mouse.parse_event(bytes([0, 0, 0x40, 3, 59])),
                          {"battery": 59, "chargeState": "charging"})
         self.assertIsNone(mouse.parse_event(bytes([0, 0, 0x40, 3, 101])))
+
+    def test_bluetooth_discovery_matches_bus_and_name_without_usb_interface(self):
+        path = "/sys/class/hidraw/hidraw9"
+        opened = []
+        def open_file(name, *args, **kwargs):
+            opened.append(name)
+            if not name.endswith("uevent"):
+                raise AssertionError("Bluetooth discovery must not read a USB interface")
+            return mock_open(read_data=(
+                "HID_ID=0005:0000045E:00000007\n"
+                "HID_NAME=X11SEmouse2\n"
+                "HID_UNIQ=78:87:12:ef:f5:05\n"))()
+        with patch.object(hid_discovery.glob, "glob", return_value=[path]), \
+             patch("builtins.open", side_effect=open_file):
+            self.assertEqual(hid_discovery.find_hidraw([X11SE_BLUETOOTH], []),
+                             (X11SE_BLUETOOTH, "/dev/hidraw9"))
+        self.assertTrue(opened)
+        self.assertTrue(all(name.endswith("uevent") for name in opened))
+
+    def test_bluetooth_discovery_rejects_other_bus_or_name(self):
+        def discover(identity, name):
+            def open_file(path, *args, **kwargs):
+                return mock_open(read_data=f"HID_ID={identity}\nHID_NAME={name}\n")()
+            with patch.object(hid_discovery.glob, "glob", return_value=["/sys/class/hidraw/hidraw9"]), \
+                 patch("builtins.open", side_effect=open_file):
+                return hid_discovery.find_hidraw([X11SE_BLUETOOTH], [])
+        self.assertIsNone(discover("0003:0000045E:00000007", "X11SEmouse2"))
+        self.assertIsNone(discover("0005:0000045E:00000007", "Other Mouse"))
+        self.assertEqual(discover("0005:0000045E:00000007", "x11semouse2"),
+                         (X11SE_BLUETOOTH, "/dev/hidraw9"))
+
+    def test_discovery_falls_back_to_bluetooth_when_receiver_is_absent(self):
+        def discovery(models, errors):
+            return (X11SE_BLUETOOTH, "/dev/hidraw9") if models == (X11SE_BLUETOOTH,) else None
+        with patch.object(hid_discovery, "find_hidraw", side_effect=discovery):
+            self.assertEqual(mouse.find_hidraw(), "/dev/hidraw9")
+
+    def test_active_bluetooth_link_is_selected_before_passive_receiver(self):
+        def discovery(models, errors):
+            if models == (X11SE,):
+                return (X11SE, "/dev/hidraw5")
+            if models == (X11SE_BLUETOOTH,):
+                return (X11SE_BLUETOOTH, "/dev/hidraw9")
+            return None
+        with patch.object(hid_discovery, "find_hidraw", side_effect=discovery):
+            self.assertEqual(mouse.find_hidraw(), "/dev/hidraw9")
+
+    def test_bluetooth_identity_requires_bluetooth_bus_and_x11se_name(self):
+        identity = {"bus": "0005", "vendor": "0000045E", "product": "00000007",
+                    "name": "X11SEmouse2", "uniq": "78:87:12:EF:F5:05"}
+        with patch.object(hid_discovery, "hid_identity", return_value=identity):
+            self.assertTrue(mouse.is_bluetooth("/dev/hidraw9"))
+            self.assertEqual(hid_discovery.bluetooth_address("/dev/hidraw9"), "78:87:12:ef:f5:05")
+        with patch.object(hid_discovery, "hid_identity", return_value={**identity, "bus": "0003"}):
+            self.assertFalse(mouse.is_bluetooth("/dev/hidraw9"))
+            self.assertIsNone(hid_discovery.bluetooth_address("/dev/hidraw9"))
+        with patch.object(hid_discovery, "hid_identity", return_value={**identity, "uniq": ""}):
+            self.assertIsNone(hid_discovery.bluetooth_address("/dev/hidraw9"))
+
+    def test_bluetooth_battery_parser_accepts_only_valid_bluez_levels(self):
+        self.assertEqual(mouse.parse_bluetooth_battery("\tBattery Percentage: 0x53 (83)\n"), 83)
+        self.assertIsNone(mouse.parse_bluetooth_battery(""))
+        self.assertIsNone(mouse.parse_bluetooth_battery("\tBattery Percentage: 0x65 (101)\n"))
+        self.assertIsNone(mouse.parse_bluetooth_battery("\tBattery Percentage: 0x53 (83\n"))
+
+    def test_bluetooth_status_reads_bluez_without_hid_access(self):
+        completed = SimpleNamespace(stdout="\tBattery Percentage: 0x53 (83)\n", returncode=0)
+        with patch.object(hid_discovery, "bluetooth_address", return_value="78:87:12:ef:f5:05"), \
+             patch.object(mouse.subprocess, "run", return_value=completed) as run:
+            status = mouse.bluetooth_status("/dev/hidraw9")
+        self.assertEqual(status["transport"], "bluetooth")
+        self.assertEqual(status["battery"], 83)
+        self.assertIsNone(status["dpi"])
+        self.assertIsNone(status["polling"])
+        self.assertTrue(status["settingsAvailable"])
+        self.assertEqual(run.call_args.args[0], ["bluetoothctl", "info", "78:87:12:ef:f5:05"])
+
+    def test_bluetooth_battery_failure_does_not_break_status(self):
+        with patch.object(hid_discovery, "bluetooth_address", return_value="78:87:12:ef:f5:05"), \
+             patch.object(mouse.subprocess, "run", side_effect=OSError("bluetoothctl missing")):
+            status = mouse.bluetooth_status("/dev/hidraw9")
+        self.assertTrue(status["connected"])
+        self.assertIsNone(status["battery"])
+
+    def test_status_once_uses_bluetooth_without_opening_hidraw(self):
+        expected = {"connected": True, "transport": "bluetooth", "battery": 83}
+        with patch.object(cli.mouse, "find_hidraw", return_value="/dev/hidraw9"), \
+             patch.object(cli.mouse, "is_bluetooth", return_value=True), \
+             patch.object(cli.mouse, "bluetooth_status", return_value=expected) as status, \
+             patch.object(cli.mouse, "open_device", side_effect=AssertionError("unexpected HID access")):
+            self.assertEqual(cli.status_once(None), expected)
+        status.assert_called_once_with("/dev/hidraw9")
+
+    def test_bluetooth_polling_is_rejected_before_opening_hidraw(self):
+        output = io.StringIO()
+        with patch.object(mouse, "find_hidraw", return_value="/dev/hidraw9"), \
+             patch.object(mouse, "is_bluetooth", return_value=True), \
+             patch.object(mouse, "open_device", side_effect=AssertionError("unexpected HID access")), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(["set-polling", "500"]), 2)
+        self.assertEqual(json.loads(output.getvalue())["errorCode"], "bluetooth_polling_unsupported")
+
+    def test_bluetooth_set_dpi_verifies_gatt_ack(self):
+        output = io.StringIO()
+        mock_result = {"dpi": 800, "stage": 2, "stages": [400, 800, 1600, 2400, 3200, 5000], "verified": True, "acknowledged": True}
+        with patch.object(mouse, "find_hidraw", return_value="/dev/hidraw9"), \
+             patch.object(mouse, "is_bluetooth", return_value=True), \
+             patch.object(mouse, "bluetooth_set_dpi", return_value=mock_result) as set_dpi, \
+             patch.object(mouse, "open_device", side_effect=AssertionError("unexpected HID access")), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(["set-dpi", "800"]), 0)
+        set_dpi.assert_called_once()
+        self.assertTrue(json.loads(output.getvalue())["ok"])
+
+    def test_bluetooth_set_lighting_verifies_gatt_ack(self):
+        output = io.StringIO()
+        mock_result = {"color": "#ff0000", "verified": True}
+        with patch.object(mouse, "find_hidraw", return_value="/dev/hidraw9"), \
+             patch.object(mouse, "is_bluetooth", return_value=True), \
+             patch.object(mouse, "bluetooth_set_lighting_color", return_value=mock_result) as set_color, \
+             patch.object(mouse, "open_device", side_effect=AssertionError("unexpected HID access")), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(["set-light-color", "#ff0000"]), 0)
+        set_color.assert_called_once()
+        self.assertTrue(json.loads(output.getvalue())["ok"])
+
+    def test_bluetooth_build_reports(self):
+        dpi_report, stage, stages = mouse.bluetooth_build_dpi_report(1200)
+        self.assertEqual(len(dpi_report), 56)
+        self.assertEqual(dpi_report[0], 0x04)
+        self.assertTrue(mouse.valid_dpi_report(dpi_report))
+        self.assertEqual(stage, 2)
+        self.assertEqual(stages[1], 1200)
+
+        light_report = mouse.bluetooth_build_lighting_report(color="#0000ff", power="on")
+        self.assertEqual(len(light_report), 15)
+        self.assertEqual(light_report[0], 0x05)
+        self.assertEqual(light_report[3], 0x10)
+        self.assertEqual(light_report[6:9], bytes([0, 0, 255]))
+        self.assertEqual(int.from_bytes(light_report[11:13], "big"), sum(light_report[3:11]))
 
 
 if __name__ == "__main__":

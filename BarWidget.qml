@@ -26,6 +26,7 @@ BarWidget {
     readonly property string barLabel: {
         if (deviceState !== "connected") return "-- · -- DPI · -- Hz"
         var batteryText = battery >= 0 ? battery + "%" : "--"
+        if (transport === "bluetooth") return batteryText + " · Bluetooth"
         var dpiText = dpi > 0 ? dpi + " DPI" : "-- DPI"
         var rateText = polling > 0 ? polling + " Hz" : "-- Hz"
         return batteryText + " · " + dpiText + " · " + rateText
@@ -37,6 +38,8 @@ BarWidget {
         var batteryText = battery >= 0
             ? battery + "%" + (chargeState ? " (" + chargeState + ")" : "")
             : "unavailable"
+        if (transport === "bluetooth")
+            return "Last checked\nBattery: " + batteryText + "\nBluetooth · DPI and polling need the receiver or USB cable"
         var dpiText = dpi > 0 ? dpi + " DPI" : "unavailable"
         var rateText = polling > 0 ? polling + " Hz" : "unavailable"
         return "Last checked\nBattery: " + batteryText + "\nDPI: " + dpiText + "\nPolling: " + rateText
@@ -61,7 +64,7 @@ BarWidget {
             stages = []
             chargeState = ""
             transport = ""
-            errorMessage = String(value.error || "Mouse receiver not detected")
+            errorMessage = String(value.error || "X11SE mouse not detected")
             return
         }
         deviceState = "connected"

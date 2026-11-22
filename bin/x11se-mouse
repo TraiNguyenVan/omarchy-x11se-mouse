@@ -17,7 +17,7 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
 import x11se_mouse as mouse
-from model_catalog import X11SE, X11SE_WIRED
+from model_catalog import X11SE, X11SE_BLUETOOTH, X11SE_WIRED
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +57,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def status_once(device: str | None) -> dict:
-    fd, path = mouse.open_device(device)
+    path = device or mouse.find_hidraw()
+    if not path:
+        raise mouse.MouseError(
+            "X11SE mouse was not found over USB, its 2.4 GHz receiver, or Bluetooth",
+            code="mouse_not_found", operation="open_device",
+            details={"discovery_errors": mouse.DISCOVERY_ERRORS[:]})
+    if mouse.is_bluetooth(path):
+        status = mouse.bluetooth_status(path)
+        cached = load_cached_status()
+        for key in ("dpi", "stage", "stages", "lightColor", "lightPower"):
+            if cached.get(key) is not None and status.get(key) is None:
+                status[key] = cached[key]
+        return status
+    fd, path = mouse.open_device(path)
     try:
         if mouse.is_wired(path):
             result = mouse.wired_status(fd)
@@ -242,18 +255,49 @@ def take_cache_warnings() -> list[dict[str, str]]:
     return warnings
 
 
+def watch_bluetooth(device: str | None, path: str, debug: bool = False) -> None:
+    """Poll the BlueZ battery level until the Bluetooth HID node disappears."""
+    last_battery = None
+    emitted = False
+    next_poll = 0.0
+    while os.path.exists(path):
+        if not device and mouse.find_hidraw() != path:
+            return
+        now = time.monotonic()
+        if now >= next_poll:
+            try:
+                status = mouse.bluetooth_status(path)
+                cached = load_cached_status()
+                for key in ("dpi", "stage", "stages", "lightColor", "lightPower"):
+                    if cached.get(key) is not None and status.get(key) is None:
+                        status[key] = cached[key]
+            except Exception as error:
+                mouse.json_line(mouse.device_error_status(error, "watch_bluetooth"))
+                if debug:
+                    traceback.print_exception(type(error), error, error.__traceback__, file=sys.stderr)
+                return
+            if not emitted or status.get("battery") != last_battery:
+                mouse.json_line(status)
+                emitted = True
+                last_battery = status.get("battery")
+            next_poll = now + mouse.BLUETOOTH_BATTERY_POLL_SECONDS
+        time.sleep(2)
+
+
 def watch(device: str | None, debug: bool = False) -> int:
     while True:
         path = device or mouse.find_hidraw()
         if not path:
-            wired = mouse.hid_discovery.find_hidraw((X11SE_WIRED,), [])
-            error = (mouse.MouseError("X11SE USB cable could not be opened", code="wired_open_failed")
-                     if wired else mouse.MouseError("X11SE 2.4 GHz receiver was not found",
-                                                    code="receiver_not_found",
-                                                    details={"discovery_errors": mouse.DISCOVERY_ERRORS[:]}))
+            error = mouse.MouseError(
+                "X11SE mouse was not found over USB, its 2.4 GHz receiver, or Bluetooth",
+                code="mouse_not_found", details={"discovery_errors": mouse.DISCOVERY_ERRORS[:]})
             status = mouse.device_error_status(error, "watch_discovery")
             mouse.json_line(status)
             time.sleep(3)
+            continue
+        if mouse.is_bluetooth(path):
+            watch_bluetooth(device, path, debug)
+            time.sleep(1)
             continue
         try:
             fd, path = mouse.open_device(path)
@@ -324,12 +368,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "devices":
             devices = []
             errors = []
-            for model, transport, supported in ((X11SE, "receiver", True), (X11SE_WIRED, "wired", True)):
+            for model, transport in ((X11SE, "receiver"), (X11SE_WIRED, "wired"),
+                                     (X11SE_BLUETOOTH, "bluetooth")):
                 discovery_errors = []
                 match = mouse.hid_discovery.find_hidraw((model,), discovery_errors)
                 errors.extend(discovery_errors)
                 if match:
-                    devices.append({"transport": transport, "device": match[1], "supported": supported})
+                    devices.append({"transport": transport, "device": match[1], "supported": True})
             print(json.dumps({"devices": devices, "discovery_errors": errors}, separators=(",", ":")))
             return 0
         if args.command in ("probe-wired", "wired-status"):
@@ -370,6 +415,40 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result["connected"] else 1
         if args.command in ("set-dpi", "set-polling", "set-light-color", "set-light-power") and not mouse.WRITES_ENABLED:
             raise mouse.MouseError("X11SE setting writes are disabled because they disconnect the receiver")
+        if args.command in ("get-lighting", "set-dpi", "set-polling", "set-light-color", "set-light-power"):
+            candidate = args.device or mouse.find_hidraw()
+            if candidate and mouse.is_bluetooth(candidate):
+                if args.command == "set-polling":
+                    raise mouse.bluetooth_polling_unsupported_error()
+                if args.command == "set-dpi":
+                    cached = load_cached_status()
+                    changed = mouse.bluetooth_set_dpi(candidate, args.value, cached)
+                    result = {"ok": True, **changed, "message": f"Active DPI set to {changed['dpi']}"}
+                    cached.update({key: changed.get(key) for key in ("dpi", "stage", "stages")})
+                    cached["connected"] = True
+                    save_cached_status(cached)
+                    result.setdefault("warnings", []).extend(take_cache_warnings())
+                    print(json.dumps(result, separators=(",", ":")))
+                    return 0
+                if args.command == "set-light-color":
+                    cached = load_cached_status()
+                    res = mouse.bluetooth_set_lighting_color(candidate, args.value, cached)
+                    cached.update({"connected": True, "lightColor": res.get("color")})
+                    save_cached_status(cached)
+                    print(json.dumps({"ok": True, **res}, separators=(",", ":")))
+                    return 0
+                if args.command == "set-light-power":
+                    cached = load_cached_status()
+                    res = mouse.bluetooth_set_lighting_power(candidate, args.value, cached)
+                    cached.update({"connected": True, "lightPower": res.get("power")})
+                    save_cached_status(cached)
+                    print(json.dumps({"ok": True, **res}, separators=(",", ":")))
+                    return 0
+                if args.command == "get-lighting":
+                    cached = load_cached_status()
+                    result = {"color": cached.get("lightColor") or "#00ff00", "power": cached.get("lightPower") or "on"}
+                    print(json.dumps({"ok": True, **result}, separators=(",", ":")))
+                    return 0
         fd, path = mouse.open_device(args.device)
         try:
             if args.command in ("get-lighting", "set-light-color", "set-light-power"):

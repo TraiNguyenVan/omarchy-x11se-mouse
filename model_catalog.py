@@ -6,6 +6,15 @@ X11SE_WIRED = {
     "usb": {"vendor": "00001D57", "product": "00002125", "interface": "02"},
 }
 
+# Bluetooth HID advertises generic SDP (045E:0007); proprietary settings
+# operate over vendor GATT FEE0 (FEE3 write request / FEE4 notify ACK).
+X11SE_BLUETOOTH = {
+    "id": "x11se-bluetooth",
+    "name": "Attack Shark X11SE",
+    "bluetooth": {"bus": "0005", "name": "X11SE"},
+    "controls": ["battery", "dpi", "lighting"],
+}
+
 X11SE = {
     "id": "x11se",
     "name": "Attack Shark X11SE",

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "trai.x11se-mouse",
   "name": "X11SE Mouse Status",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "author": "trai",
   "license": "MIT",
-  "description": "CLI-backed X11SE status, bar panel, and DPI/polling controls",
+  "description": "Battery, DPI, polling rate, and lighting controls for Attack Shark X11SE across 2.4 GHz, USB, and Bluetooth",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "BarWidget.qml"

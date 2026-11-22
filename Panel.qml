@@ -42,7 +42,8 @@ Item {
         if (capabilities) presets = validPresets(storedPresets) ? storedPresets.slice() : defaultPresets.slice()
     }
     readonly property bool connected: hostWidget && hostWidget.deviceState === "connected"
-    readonly property var transportLabels: ({wired: "USB wired", receiver: "Wireless receiver"})
+    readonly property var transportLabels: ({wired: "USB wired", receiver: "Wireless receiver", bluetooth: "Bluetooth"})
+    readonly property bool bluetoothTransport: connected && hostWidget.transport === "bluetooth"
     readonly property bool lowBattery: hostWidget && hostWidget.battery >= 0 && hostWidget.battery <= 10
     readonly property var dpiOptions: {
         var values = verifiedDpi.map(function(n) { return { value: String(n), label: formatInteger(n) + " DPI" } })
@@ -576,13 +577,21 @@ Item {
                     }
                     Text {
                         anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                        textFormat: Text.PlainText; text: root.displayPolling > 0 ? root.formatInteger(root.displayPolling) + " Hz" : "—"
+                        textFormat: Text.PlainText; text: root.bluetoothTransport ? "125 Hz (BLE)" : (root.displayPolling > 0 ? root.formatInteger(root.displayPolling) + " Hz" : "—")
                         color: Color.foreground; font.family: root.bar ? root.bar.fontFamily : Style.font.family
                         font.pixelSize: Math.round(Style.font.body * 1.25); font.bold: true
                     }
                 }
+                Text {
+                    visible: root.bluetoothTransport
+                    width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.PlainText
+                    text: "Bluetooth polling rate is fixed to 125 Hz. Use USB or 2.4 GHz receiver to change."
+                    color: Color.muted; font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.body
+                }
                 Row {
                     id: rateRow; width: parent.width; spacing: Style.space(5.7)
+                    visible: !root.bluetoothTransport
                     Repeater {
                         model: root.pollingRates
                         delegate: PresetButton {
@@ -744,7 +753,7 @@ Item {
             textFormat: Text.PlainText; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter
             text: (root.hostWidget && root.hostWidget.cacheUnavailable && !root.actionError && !root.presetSaving && !commandProcess.running && !statusProcess.running)
                 ? (root.actionMessage === "Presets saved" || root.actionMessage === "Presets already saved" ? root.actionMessage + " · status cache unavailable" : "Status cache unavailable · check CLI warnings")
-                : root.actionMessage || (root.lowBattery ? "Battery low · " + hostWidget.battery + "%" : (root.connected ? "Last known settings" : "Receiver unavailable. Check the receiver and refresh."))
+                : root.actionMessage || (root.lowBattery ? "Battery low · " + hostWidget.battery + "%" : (root.connected ? "Last known settings" : "Mouse unavailable. Check the receiver, cable, or Bluetooth connection and refresh."))
             color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.72); font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Math.round(Style.font.body * 1.1)
         }
     }
