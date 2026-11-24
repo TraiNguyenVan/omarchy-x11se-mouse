@@ -711,16 +711,14 @@ def wait_for_command_confirmation(
 def drain_events(fd: int, current: dict[str, Any], timeout: float = 0) -> bool:
     changed = False
     deadline = time.monotonic() + max(0, timeout)
-    first = True
     while True:
         remaining = max(0, deadline - time.monotonic()) if timeout else 0
         try:
-            ready, _, _ = select.select([fd], [], [], remaining if first else 0)
+            ready, _, _ = select.select([fd], [], [], 0 if changed else remaining)
         except OSError as error:
             raise MouseError(f"Could not wait for receiver events: {error.strerror}",
                              code="receiver_event_wait_failed", operation="drain_events",
                              details={"errno": error.errno}) from error
-        first = False
         if not ready:
             return changed
         try:

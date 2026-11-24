@@ -205,6 +205,21 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(result["dpi"], 800)
             self.assertTrue(any(w["code"] == "cache_unavailable" for w in result["warnings"]))
 
+    def test_receiver_refresh_does_not_return_cached_battery(self):
+        with patch.object(mouse, "find_hidraw", return_value="/dev/hidraw2"), \
+             patch.object(mouse, "is_bluetooth", return_value=False), \
+             patch.object(mouse, "is_wired", return_value=False), \
+             patch.object(mouse, "open_device", return_value=(os.open(os.devnull, os.O_RDONLY), "mock")), \
+             patch.object(mouse, "protocol_lock", side_effect=contextlib.nullcontext), \
+             patch.object(mouse, "drain_events", return_value=False) as drain, \
+             patch.object(mouse, "query_status", return_value={"connected": True, "battery": None}), \
+             patch.object(cli, "load_cached_status", return_value={"battery": 86, "chargeState": "normal"}), \
+             patch.object(cli, "save_cached_status"):
+            result = cli.status_once(None)
+        self.assertIsNone(result["battery"])
+        self.assertNotIn("chargeState", result)
+        self.assertGreater(drain.call_args.kwargs["timeout"], 0)
+
     def test_presets_existing_file_round_trip(self):
         with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             path = Path(directory) / "omarchy" / "x11se-presets.json"

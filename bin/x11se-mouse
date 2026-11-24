@@ -77,14 +77,13 @@ def status_once(device: str | None) -> dict:
             with mouse.protocol_lock():
                 mouse.drain_events(fd, result, timeout=0.2)
             return result
-        cached = load_cached_status()
-        battery = {key: cached[key] for key in ("battery", "chargeState") if cached.get(key) is not None}
+        battery = {}
         with mouse.protocol_lock():
             mouse.drain_events(fd, battery, timeout=0)
         result = mouse.query_status(fd, battery)
         result["transport"] = "receiver"
         with mouse.protocol_lock():
-            mouse.drain_events(fd, battery, timeout=0)
+            mouse.drain_events(fd, battery, timeout=0 if battery else 3.0)
         result.update(battery)
         save_cached_status(result)
         warnings = take_cache_warnings()
@@ -311,6 +310,8 @@ def watch(device: str | None, debug: bool = False) -> int:
         try:
             wired = mouse.is_wired(path)
             status = mouse.wired_status(fd) if wired else load_cached_status()
+            if not wired:
+                status.update(battery=None, chargeState=None)
             status["transport"] = "wired" if wired else "receiver"
             status.update({"connected": True, "error": None})
             with mouse.protocol_lock():
